@@ -1,0 +1,12 @@
+
+        <configuration>
+            <input>
+                <net-file value="lomonosov_mini.net.xml"/>
+                <route-files value="simulation.rou.xml"/>
+            </input>
+            <time>
+                <begin value="0"/>
+                <end value="3600"/>
+            </time>
+        </configuration>
+        

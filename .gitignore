@@ -1,0 +1,34 @@
+# --- Python & Environment ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.env
+cache
+
+# --- Ray & Training Results ---
+ray_results/
+~/ray_results/
+default_setup/
+
+# --- SUMO Simulation Files ---
+*.out.xml
+*.log
+tripinfo.xml
+summary.xml
+queue.xml
+
+# --- Jupyter Notebooks ---
+.ipynb_checkpoints
+*/.ipynb_checkpoints/*
+
+# --- Data & Maps ---
+data/network/tests/
+# *.osm
+
+# --- IDEs & OS ---
+.vscode/
+.idea/
+.DS_Store
