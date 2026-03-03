@@ -1,73 +1,105 @@
 import osmnx as ox
-import networkx as nx
 import os
 import logging
+
+from shapely import box
 
 ox.settings.log_console = True
 ox.settings.use_cache = True
 ox.settings.requests_timeout = 300
-ox.settings.overpass_endpoint = "https://overpass.openstreetmap.fr/api/interpreter"
 ox.settings.all_oneway = True
 
 # Configure logging for better debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 class MapExtractor:
-    def __init__(self, location, dist=None, network_type='drive'):
+    def __init__(self, 
+                 location=None, 
+                 dist=500, 
+                 place_name=None, 
+                 polygon=None, 
+                 file_path=None, 
+                 network_type='drive'):
         """
-        Initialize the extractor.
-        :param location: String representing the area (e.g., "Arbat District, Moscow") or exact coordinates (needs dist)
-        :param network_type: Type of roads to download (standard is 'drive')
+        Initialize the extractor with various data source options.
         """
-        self.location = location
-        self.dist = dist
+        self.location = location      # (lat, lon) tuple
+        self.dist = dist              # distance in meters for bbox
+        self.place_name = place_name  # string, e.g., "Lomonosov, Saint Petersburg"
+        self.polygon = polygon        # shapely.geometry.Polygon object
+        self.file_path = file_path    # path to local .osm or .graphml file
         self.network_type = network_type
+        
         self.graph = None
         self.signals = None
 
-    def download_and_process(self, visualize=False):
+    def download_and_process(self):
         """
-        Downloads map data from OSM and identifies traffic signal nodes.
+        Loads map data based on the provided source and truncates it to the target area.
         """
-        
         try:
-            if isinstance(self.location, tuple):
-                logger.info(f"Downloading graph for radius: {(self.location, self.dist)}")
-                if self.dist is None:
-                    raise ValueError("Distance (dist) must be provided for coordinate-based search.")
-                
-                logger.info(f"Downloading graph around coordinates: {self.location} with radius {self.dist}m")
-                self.graph = ox.graph_from_point(
-                    self.location, 
-                    dist=self.dist, 
-                    network_type=self.network_type, 
-                    simplify=False
+            # 1. PRIORITY: Load from local file if provided
+            if self.file_path and os.path.exists(self.file_path):
+                logger.info(f"Loading base graph from local file: {self.file_path}")
+                if self.file_path.endswith('.osm'):
+                    full_graph = ox.graph_from_xml(self.file_path, simplify=False)
+                else:
+                    full_graph = ox.load_graphml(self.file_path, simplify=False)
+            
+            # 2. OPTION: Download by place name
+            elif self.place_name:
+                logger.info(f"Downloading graph for place: {self.place_name}")
+                full_graph = ox.graph_from_place(self.place_name, network_type=self.network_type, simplify=False)
+            
+            # 3. OPTION: Download by coordinates (default fallback)
+            else:
+                logger.info(f"Downloading graph around coordinates: {self.location}")
+                # Download slightly larger area to ensure clean truncation later
+                full_graph = ox.graph_from_point(self.location, dist=self.dist + 100, 
+                                               network_type=self.network_type, simplify=False)
+
+            # --- TRUNCATION LOGIC --- 
+            
+            # Create the bounding polygon if not explicitly provided
+            target_polygon = self.polygon
+            
+            if target_polygon is None and self.location and self.dist:
+                n, s, e, w = ox.utils_geo.bbox_from_point(self.location, dist=self.dist)
+                target_polygon = box(w, s, e, n)
+                logger.info(f"Created bounding box polygon for truncation (dist={self.dist}m)")
+
+            if target_polygon:
+                logger.info("Applying polygon truncation to the graph...")
+                self.graph = ox.truncate.truncate_graph_polygon(
+                    full_graph, 
+                    target_polygon, 
+                    truncate_by_edge=False
                 )
             else:
-                logger.info(f"Downloading graph for place name: {self.location}")
-                self.graph = ox.graph_from_place(
-                    self.location, 
-                    network_type=self.network_type, 
-                    simplify=False
-                )
+                self.graph = full_graph
 
         except Exception as e:
-            logger.error(f"Failed to download map data: {e}")
+            logger.error(f"Failed to process map data: {e}")
             return None, None
 
-        logger.info("Extracting traffic signal infrastructure...")
-        
-        # Convert graph nodes to a GeoDataFrame for filtering
+        # Extract traffic signals from the processed graph
+        logger.info("Filtering traffic signal nodes...")
         nodes, _ = ox.graph_to_gdfs(self.graph)
         
-        # Filter nodes tagged as 'traffic_signals'
         if 'highway' in nodes.columns:
-            self.signals = nodes[nodes['highway'] == 'traffic_signals']
+            # 1. Standard node signals
+            standard_signals = nodes[nodes['highway'] == 'traffic_signals']
+            
+            # 2. Add crossing signals if they exist (sometimes labeled as crossings)
+            crossing_signals = nodes[nodes['highway'].isin(['crossing']) & 
+                                    (nodes.get('crossing') == 'traffic_signals')]
+            
+            import pandas as pd
+            self.signals = pd.concat([standard_signals, crossing_signals]).drop_duplicates()
         else:
             self.signals = []
 
         logger.info(f"Graph nodes: {len(self.graph.nodes)}")
-        logger.info(f"Traffic signals (agents): {len(self.signals)}")
         return self.graph, self.signals
 
     def get_adjacency_list(self):
@@ -98,44 +130,48 @@ class MapExtractor:
         return filepath
 
     def visualize_with_signals(self, save_path=None):
-        if not self.graph: 
+        if self.graph is None or len(self.graph.nodes) == 0:
+            logger.error("Graph is empty.")
             return
 
         node_colors = []
         node_sizes = []
         
-        for node, data in self.graph.nodes(data=True):
-            is_signal = data.get('highway') == 'traffic_signals'
-            
-            if is_signal:
-                logger.info(f"Found signal light at {data}")
-                node_colors.append('#FF0000')
-                node_sizes.append(80)
+        signal_ids = set(self.signals.index) if hasattr(self.signals, 'index') else set()
+
+        for node in self.graph.nodes():
+            if node in signal_ids:
+                node_colors.append('#FF4500') # Оранжево-красный для светофоров
+                node_sizes.append(50)
             else:
-                node_colors.append('#555555')
-                node_sizes.append(10)
+                node_colors.append('#666666') # Серый для обычных узлов
+                node_sizes.append(15)
 
-        fig, ax = ox.plot_graph(
-            self.graph,
-            node_color=node_colors,
-            node_size=node_sizes,
-            node_alpha=0.8,
-            edge_color='#CCCCCC',
-            edge_linewidth=0.8,
-            bgcolor='#FFFFFF',
-            show=False,
-            close=False
-        )
 
-        if save_path:
+        if not node_sizes:
+            node_sizes = 15 # Стандартный размер, если списки пусты
+            node_colors = '#666666'
+
+        try:
             import matplotlib.pyplot as plt
-            directory = os.path.dirname(save_path)
-            if directory and not os.path.exists(directory):
-                os.makedirs(directory, exist_ok=True)
-                logger.info(f"Created directory: {directory}")
-            plt.savefig(save_path, bbox_inches='tight', dpi=300)
-            logger.info(f"Signal visualization saved to {save_path}")
-            plt.close(fig)
-        else:
-            import matplotlib.pyplot as plt
-            plt.show()
+            
+            fig, ax = ox.plot_graph(
+                self.graph,
+                node_color=node_colors,
+                node_size=node_sizes,
+                node_alpha=0.8,
+                edge_color='#CCCCCC',
+                edge_linewidth=0.8,
+                bgcolor='#FFFFFF',
+                show=False,
+                close=False
+            )
+            
+            if save_path:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                fig.savefig(save_path, format='svg' if save_path.endswith('.svg') else 'png')
+                plt.close(fig)
+                logger.info(f"Preview saved to {save_path}")
+                
+        except Exception as e:
+            logger.error(f"Error while saving the graph {e}")

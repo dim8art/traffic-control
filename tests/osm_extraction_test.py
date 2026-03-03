@@ -2,7 +2,7 @@ import os
 import sys
 
 # Adding the 'src' directory to the python path to import our modules
-sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+
 
 from src.map_engine.extractor import MapExtractor
 

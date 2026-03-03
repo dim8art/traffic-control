@@ -6,7 +6,7 @@ logger = logging.getLogger(__name__)
 
 class MapConverter:
     @staticmethod
-    def graphml_to_sumo(input_path, output_filename):
+    def osm_to_sumo(input_path, output_filename):
         """
         Converts GraphML file to SUMO network format.
         """
@@ -22,9 +22,14 @@ class MapConverter:
             "netconvert",
             "--osm-files", input_path, 
             "--output-file", output_path,
-            "--geometry.remove", "true",
-            "--roundabouts.guess", "true",
-            "--junctions.join", "true"
+            "--geometry.remove", "true",        # Удаляем лишние точки на прямых
+            "--roundabouts.guess", "true",      # Угадываем кольца
+            "--junctions.join", "true",         # Объединяем близкие перекрестки
+            "--junctions.join-dist", "10",      # Расстояние для объединения (10м)
+            "--tls.join", "true",               # Группируем светофоры (критично для RL)
+            "--no-internal-links", "false",     # Оставь false, если хочешь видеть очереди внутри
+            "--no-turnarounds", "true",         # Убираем развороты (ускоряет расчет путей)
+            "--offset.disable-normalization", "true"
         ]
         
         try:
@@ -34,3 +39,4 @@ class MapConverter:
         except Exception as e:
             logger.error(f"Conversion failed: {e}")
             return None
+    

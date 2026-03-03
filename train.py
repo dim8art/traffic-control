@@ -1,43 +1,91 @@
+import os
+import argparse
+import numpy as np
+from gymnasium import spaces
+
 from ray import tune
+from ray.tune import CheckpointConfig, RunConfig
 from ray.rllib.algorithms.ppo import PPOConfig
+
 from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks
 from src.simulation.runner import SumoRunner
-from gymnasium import spaces
-import numpy as np
 
-=
-runner = SumoRunner("/home/dim8art/traffic-control/data/sumo/lomonosov_mini.net.xml")
+def run_train(net_file_path, traffic_period, duration):
+    if not os.path.exists(net_file_path):
+        raise FileNotFoundError(f"Network file not found: {net_file_path}")
 
-config = (
-    PPOConfig()
-    # Отключаем экспериментальный стек, чтобы избежать ошибок с ID
-    .api_stack(
-        enable_rl_module_and_learner=False, 
-        enable_env_runner_and_connector_v2=False
+    config = (
+        PPOConfig()
+        .api_stack(
+            enable_rl_module_and_learner=False, enable_env_runner_and_connector_v2=False
+        )
+        .environment(
+            MultiAgentTrafficEnv,
+            env_config={
+                "net_file": net_file_path,
+                "traffic_period": traffic_period,  # Pass period (e.g., 0.2 for heavy traffic)
+                "duration": duration,  # Simulation time (e.g., 3600s)
+            },
+        )
+        .framework("torch")
+        .env_runners(
+            num_env_runners=6, rollout_fragment_length=50, sample_timeout_s=120
+        )
+        .callbacks(TrafficCallbacks)
+        .multi_agent(
+            policies={
+                "traffic_policy": (
+                    None,
+                    spaces.Box(low=0, high=1000, shape=(3,), dtype=np.float32),
+                    spaces.Discrete(2),
+                    {},
+                ),
+            },
+            policy_mapping_fn=lambda agent_id, *args, **kwargs: "traffic_policy",
+        ).checkpointing(
+            export_native_model_files=True,
+            checkpoint_trainable_policies_only=False,
+        )
     )
-    .environment(
-        MultiAgentTrafficEnv, 
-        env_config={"runner": runner, "net_file": runner.net_file}
-    )
-    .framework("torch")
-    .env_runners(num_env_runners=1)
-    .callbacks(TrafficCallbacks) 
-    .multi_agent(
-        policies={
-            "traffic_policy": (
-                None, 
-                spaces.Box(low=0, high=1000, shape=(1,), dtype=np.float32), 
-                spaces.Discrete(2), 
-                {}
+
+    config.train_batch_size = 4000
+    config.sgd_minibatch_size = 256
+    config.num_sgd_iter = 10
+    tuner = tune.Tuner(
+        "PPO",
+        param_space=config.to_dict(),
+        run_config=tune.RunConfig(
+            name="SUMO_PPO_FINAL",
+            stop={"training_iteration": 1000},
+            checkpoint_config=CheckpointConfig(
+                num_to_keep=3,
+                checkpoint_frequency=10,
+                checkpoint_at_end=True,
             ),
-        },
-        policy_mapping_fn=lambda agent_id, *args, **kwargs: "traffic_policy",
+        ),
     )
-)
+    tuner.fit()
 
-tuner = tune.Tuner(
-    "PPO",
-    param_space=config.to_dict(),
-    run_config=tune.RunConfig(stop={"training_iteration": 50})
-)
-tuner.fit()
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Start RL training for SUMO agent")
+    parser.add_argument(
+        "--net", 
+        type=str, 
+        required=True, 
+        help="Path to .net.xml file"
+    )
+    parser.add_argument(
+        "--period", 
+        type=float, 
+        default=0.5, 
+        help="Traffic generation period (lower = more traffic, e.g. 0.2)"
+    )
+    parser.add_argument(
+        "--duration", 
+        type=int, 
+        default=3600, 
+        help="Simulation duration in seconds"
+    )
+    
+    args = parser.parse_args()
+    run_train(args.net, args.period, args.duration)

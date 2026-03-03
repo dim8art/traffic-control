@@ -1,9 +1,15 @@
+import os
+import time
 import gymnasium as gym
 from gymnasium import spaces
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 import numpy as np
 import traci
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
+import logging
+
+from src.simulation.runner import SumoRunner
+logger = logging.getLogger(__name__)
 
 class TrafficCallbacks(DefaultCallbacks):
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
@@ -32,57 +38,78 @@ class TrafficCallbacks(DefaultCallbacks):
 
 class MultiAgentTrafficEnv(MultiAgentEnv):
     def __init__(self, config):
-        self.runner = config["runner"]
-        
-        import traci
-        traci.start(["sumo", "-n", config["net_file"], "--no-warnings", "true"])
-        self._agent_ids = set(traci.trafficlight.getIDList())
-        traci.close()
+        self.net_file = config["net_file"]
+        self.traffic_period = config.get("traffic_period", 0.5)
+        self.duration = config.get("duration", 3600)
 
-        self.observation_space = spaces.Dict({
-            a_id: spaces.Box(low=0, high=1000, shape=(1,), dtype=np.float32)
-            for a_id in self._agent_ids
-        })
-        self.action_space = spaces.Dict({
-            a_id: spaces.Discrete(2)
-            for a_id in self._agent_ids
-        })
+        worker_index = config.worker_index if hasattr(config, "worker_index") else 0
+        self.worker_id = f"worker_{worker_index}"
+        self.worker_port = 9000 + worker_index
         
+        self.runner = SumoRunner(
+            self.net_file, 
+            unique_id=self.worker_id,
+            port=self.worker_port,
+        )
+
+
+        self.observation_space = spaces.Box(low=0, high=1000, shape=(3,), dtype=np.float32)
+        self.action_space = spaces.Discrete(2)
+
+        self._agent_ids = [] 
+        self.last_actions = {}
+        self.gui_enabled = config.get("gui", False)
         super().__init__()
 
-    def reset(self, *, seed=None, options=None):
+    def reset(self, *, seed=None, options=None, worker_port=None):
         try: 
-            traci.close()
+            traci.close(self.runner.unique_id)
         except: 
             pass
-        
-        self.runner.generate_random_traffic(n_vehicles=100)
+
+        self.runner.generate_random_traffic(
+            period=self.traffic_period, 
+            duration=self.duration
+        )
         self.runner.create_config()
         
-        traci.start(["sumo", "-c", self.runner.cfg_file, "--no-warnings", "true"])
-        
-        self._agent_ids = set(traci.trafficlight.getIDList())
+        self.runner.start(gui=self.gui_enabled)
+        traci.switch(self.runner.unique_id)
+
+        if not self._agent_ids:
+            self._agent_ids = list(traci.trafficlight.getIDList())
+
+        for _ in range(500): 
+            traci.simulationStep()
+            if traci.simulation.getMinExpectedNumber() > 0:
+                break
+
+        self._agent_ids = list(traci.trafficlight.getIDList())
         
         observations = {a_id: self._get_local_obs(a_id) for a_id in self._agent_ids}
+        self.last_actions = {a_id: 0 for a_id in self._agent_ids}
+        
         return observations, {}
 
     def step(self, action_dict):
+        traci.switch(self.runner.unique_id)
         for tls_id, action in action_dict.items():
             if tls_id in self._agent_ids:
-                if action == 1:
+                if action == 1: 
                     self._handle_phase_change(tls_id)
 
-        for _ in range(5):
+        for _ in range(15):
             traci.simulationStep()
 
         system_stats = self.get_system_metrics()
+        
+        observations = {}
+        rewards = {}
+        for a_id in self._agent_ids:
+            observations[a_id] = self._get_local_obs(a_id)
+            rewards[a_id] = self._get_local_reward(a_id, action_dict[a_id])
 
-        observations = {a_id: self._get_local_obs(a_id) for a_id in self._agent_ids}
-        rewards = {a_id: self._get_local_reward(a_id) for a_id in self._agent_ids}
-        
-        # RLlib ожидает флаг завершения для всей среды под ключом "__all__"
         is_terminated = traci.simulation.getMinExpectedNumber() <= 0
-        
         terminations = {a_id: is_terminated for a_id in self._agent_ids}
         terminations["__all__"] = is_terminated
         
@@ -90,11 +117,11 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         truncations["__all__"] = False
         
         info = {
-                "__common__": {
-                    "system_avg_speed": system_stats["avg_speed"],
-                    "system_mean_waiting_time": system_stats["mean_waiting_time"]
-                }
+            "__common__": {
+                "system_avg_speed": system_stats["avg_speed"],
+                "system_mean_waiting_time": system_stats["mean_waiting_time"]
             }
+        }
         
         return observations, rewards, terminations, truncations, info
 
@@ -106,13 +133,48 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         traci.trafficlight.setPhase(tls_id, next_phase)
 
     def _get_local_obs(self, tls_id):
-        waiting_cars, _ = self.runner.get_tls_state(tls_id)
-        return np.array([float(waiting_cars)], dtype=np.float32)
+        # Получаем данные о текущем TLS
+        waiting_cars, avg_speed = self.runner.get_tls_state(tls_id)
+        
+        # Находим входящие и исходящие ребра для этого светофора
+        lanes_in = traci.trafficlight.getControlledLanes(tls_id)
+        
+        # Получаем плотность на "подступах" (upstream)
+        upstream_occupancy = [traci.lane.getLastStepOccupancy(ln) for ln in lanes_in]
+        avg_upstream = sum(upstream_occupancy) / len(upstream_occupancy) if upstream_occupancy else 0
 
-    def _get_local_reward(self, tls_id):
-        waiting_cars, _ = self.runner.get_tls_state(tls_id)
-        return -float(waiting_cars)
-    
+        return np.array([
+            float(waiting_cars), 
+            float(avg_speed),
+            float(avg_upstream)
+        ], dtype=np.float32)
+
+    def _get_local_reward(self, tls_id, action):
+        # --- Логика Давления (Pressure) ---
+        # Входящие очереди (те, кто стоят перед красным у нас)
+        lanes_in = traci.trafficlight.getControlledLanes(tls_id)
+        halt_in = sum([traci.lane.getLastStepHaltingNumber(l) for l in set(lanes_in)])
+        
+        # Исходящие очереди (те, кто стоят у соседей впереди)
+        links = traci.trafficlight.getControlledLinks(tls_id)
+        out_lanes = set()
+        for link in links:
+            for conn in link:
+                out_lanes.add(conn[1]) # ID исходящей полосы
+        
+        halt_out = sum([traci.lane.getLastStepHaltingNumber(l) for l in out_lanes])
+        
+        # Формула давления: (Входящие + Исходящие*0.3)
+        # Если впереди пробка (halt_out большой), награда уменьшится
+        pressure = halt_in + halt_out*0.3
+        reward = -float(pressure)
+
+        # --- Штраф за переключение ---
+        # Если действие action == 1 (смена фазы), вычитаем штраф
+        if action is not None and action == 1:
+            reward -= 0.1 
+        return reward
+
     def get_system_metrics(self):
         """
         Collect all traffic data

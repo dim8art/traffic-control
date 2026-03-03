@@ -12,6 +12,7 @@ cache
 ray_results/
 ~/ray_results/
 default_setup/
+checkpoints
 
 # --- SUMO Simulation Files ---
 *.out.xml
@@ -19,13 +20,18 @@ default_setup/
 tripinfo.xml
 summary.xml
 queue.xml
-
+*.rou.xml
+*.rou.alt.xml
+*sumocfg
+*svg
+*map.net.xml
+*run_worker*
 # --- Jupyter Notebooks ---
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 
 # --- Data & Maps ---
-data/network/tests/
+data/
 # *.osm
 
 # --- IDEs & OS ---
