@@ -39,7 +39,7 @@ def run_train(sumo_net_xml_path: str, traffic_period: float, duration: int) -> N
             policies={
                 "traffic_policy": (
                     None,
-                    spaces.Box(low=0, high=1000, shape=(3,), dtype=np.float32),
+                    spaces.Box(low=0, high=1000, shape=(6,), dtype=np.float32),
                     spaces.Discrete(2),
                     {},
                 ),
