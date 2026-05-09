@@ -28,6 +28,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     train_parser.add_argument("--period", type=float, default=0.5, help="Traffic period")
     train_parser.add_argument("--duration", type=int, default=3600, help="Episode duration")
+    train_parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Пешеходы в симуляции (нужна пешеходная сеть в .net.xml)",
+    )
+    train_parser.add_argument(
+        "--pedestrian-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал пешеходов (по умолчанию от --period)",
+    )
+    train_parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Автобусы (vclass=bus) как упрощённый ОТ",
+    )
+    train_parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал рейсов ОТ (по умолчанию от --period)",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="Запуск обученной политики в SUMO")
     demo_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path")
@@ -39,6 +63,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     demo_parser.add_argument("--period", type=float, default=0.4, help="Traffic period")
     demo_parser.add_argument("--duration", type=int, default=3600, help="Episode duration")
+    demo_parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Пешеходы в симуляции",
+    )
+    demo_parser.add_argument(
+        "--pedestrian-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал пешеходов",
+    )
+    demo_parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Автобусы (vclass=bus)",
+    )
+    demo_parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал ОТ",
+    )
+    demo_parser.add_argument(
+        "--saliency",
+        action="store_true",
+        help="Включить saliency в консоль (эквивалент --explain-obs-every 1, если тот не задан)",
+    )
     demo_parser.add_argument(
         "--explain-obs-every",
         type=int,
@@ -84,6 +137,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sumo_parser.add_argument("--period", type=float, default=0.4, help="Интервал выпуска ТС")
     sumo_parser.add_argument("--duration", type=int, default=3600, help="Длительность, с")
+    sumo_parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Пешеходы в симуляции",
+    )
+    sumo_parser.add_argument("--pedestrian-period", type=float, default=None, metavar="SEC")
+    sumo_parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Автобусы (vclass=bus)",
+    )
+    sumo_parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+    )
     sumo_parser.add_argument("--no-gui", action="store_false", dest="gui", help="SUMO без GUI")
     sumo_parser.set_defaults(gui=True)
 
@@ -97,6 +167,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench_parser.add_argument("--period", type=float, default=0.4, help="Traffic period")
     bench_parser.add_argument("--duration", type=int, default=3600, help="Episode duration")
+    bench_parser.add_argument("--with-pedestrians", action="store_true")
+    bench_parser.add_argument("--pedestrian-period", type=float, default=None, metavar="SEC")
+    bench_parser.add_argument("--with-public-transport", action="store_true")
+    bench_parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+    )
 
     subparsers.add_parser("tui", help="Интерактивное меню")
 
@@ -120,24 +199,55 @@ def main() -> None:
     if args.command == "prepare":
         run_prepare_from_args(args)
     elif args.command == "train":
-        run_train(args.map, args.period, args.duration)
+        run_train(
+            args.map,
+            args.period,
+            args.duration,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
+        )
     elif args.command == "demo":
+        explain_every = args.explain_obs_every
+        if getattr(args, "saliency", False) and explain_every is None:
+            explain_every = 1
         run_inference(
             args.checkpoint,
             args.map,
             args.duration,
             args.period,
             args.gui,
-            explain_obs_every=args.explain_obs_every,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
+            explain_obs_every=explain_every,
             explain_tls_limit=args.explain_tls_limit,
             tensorboard_dir=args.tensorboard_dir,
             tensorboard_saliency_every=args.tensorboard_saliency_every,
         )
     elif args.command == "sumo":
-        run_sumo_freerun(args.map, args.duration, args.period, args.gui)
+        run_sumo_freerun(
+            args.map,
+            args.duration,
+            args.period,
+            args.gui,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
+        )
     elif args.command == "benchmark":
         run_comprehensive_benchmark(
-            args.checkpoint, args.map, args.duration, args.period
+            args.checkpoint,
+            args.map,
+            args.duration,
+            args.period,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
         )
     elif args.command == "tui":
         from tui import run_tui

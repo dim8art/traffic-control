@@ -3,6 +3,7 @@ from subprocess import CalledProcessError, CompletedProcess
 
 os.environ.setdefault("SUMO_HOME", "/tmp")
 
+from src.simulation.env import traffic_env_config
 from src.simulation.runner import SumoRunner
 
 
@@ -72,3 +73,43 @@ def test_create_config_writes_sumocfg(tmp_path):
     content = open(runner.cfg_file, "r", encoding="utf-8").read()
     assert "<configuration>" in content
     assert str(net_file.name) not in content  # stored as copied worker-local net file
+    assert '<end value="3600"/>' in content
+
+
+def test_traffic_env_config_omits_none_periods():
+    cfg = traffic_env_config(
+        "/tmp/map.net.xml",
+        traffic_period=0.3,
+        duration=120,
+        enable_pedestrians=True,
+    )
+    assert cfg["enable_pedestrians"] is True
+    assert "pedestrian_period" not in cfg
+
+
+def test_generate_random_traffic_with_pedestrians_calls_random_trips_twice(
+    tmp_path, monkeypatch
+):
+    net_file = tmp_path / "demo.net.xml"
+    net_file.write_text("<net></net>", encoding="utf-8")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    (tools_dir / "randomTrips.py").write_text("# stub", encoding="utf-8")
+    monkeypatch.setenv("SUMO_HOME", str(tmp_path))
+
+    captured: list[list[str]] = []
+
+    def fake_run(cmd, check=True, capture_output=False, text=False):
+        captured.append(list(cmd))
+        return CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("src.simulation.runner.subprocess.run", fake_run)
+
+    runner = SumoRunner(str(net_file), output_dir=str(tmp_path / "sumo"), unique_id="ped")
+    runner.generate_random_traffic(
+        period=0.5, duration=1800, enable_pedestrians=True
+    )
+
+    assert len(captured) == 2
+    assert any("--pedestrians" in cmd for cmd in captured)
+    assert runner._include_pedestrians is True

@@ -1,0 +1,54 @@
+# Cursor: exclude from indexing / reduce noise in search & @-mentions.
+# (Does not affect git; see .gitignore for version control.)
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# --- Virtual envs ---
+.venv/
+venv/
+ENV/
+
+# --- Secrets (never index) ---
+.env
+.env.*
+
+# --- RL / experiments (large binaries, low value for code navigation) ---
+checkpoints/
+cache/
+ray_results/
+**/run_worker*/
+default_setup/
+
+# --- Maps, OSM extracts, SUMO runs (often huge) ---
+data/
+
+# --- SUMO / sim outputs (logs, TripInfo, etc.) ---
+*.out.xml
+tripinfo.xml
+summary.xml
+queue.xml
+*.rou.xml
+*.rou.alt.xml
+*sumocfg
+*.log
+
+# --- Jupyter ---
+.ipynb_checkpoints/
+
+# --- Large docs (remove this line if you want PDFs in codebase search) ---
+*.pdf
+
+# --- OS / IDE noise ---
+.DS_Store
+.idea/
+.vscode/

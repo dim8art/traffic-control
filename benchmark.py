@@ -11,7 +11,7 @@ import ray
 import traci
 from ray.rllib.algorithms.algorithm import Algorithm
 
-from src.simulation.env import MultiAgentTrafficEnv
+from src.simulation.env import MultiAgentTrafficEnv, traffic_env_config
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +43,22 @@ def get_metrics(
     period: float,
     *,
     is_ppo: bool = False,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
 ) -> dict[str, float]:
     """Запуск симуляции для конкретного файла сети"""
-    env_config = {
-        "net_file": sumo_net_xml_path,
-        "traffic_period": period,
-        "duration": duration,
-        "gui": False
-    }
+    env_config = traffic_env_config(
+        sumo_net_xml_path,
+        traffic_period=period,
+        duration=duration,
+        gui=False,
+        enable_pedestrians=enable_pedestrians,
+        pedestrian_period=pedestrian_period,
+        enable_public_transport=enable_public_transport,
+        public_transport_period=public_transport_period,
+    )
     env = MultiAgentTrafficEnv(env_config)
     obs, info = env.reset()
     
@@ -91,6 +99,11 @@ def run_comprehensive_benchmark(
     base_sumo_net_xml: str,
     duration: int,
     period: float,
+    *,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
 ) -> None:
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, logging_level="ERROR")
@@ -122,7 +135,17 @@ def run_comprehensive_benchmark(
                 logger.warning("Пропуск %s: пересборка сети не удалась.", v_id)
                 continue
 
-        res = get_metrics(algo, current_net, duration, period, is_ppo=v_info['ppo'])
+        res = get_metrics(
+            algo,
+            current_net,
+            duration,
+            period,
+            is_ppo=v_info["ppo"],
+            enable_pedestrians=enable_pedestrians,
+            pedestrian_period=pedestrian_period,
+            enable_public_transport=enable_public_transport,
+            public_transport_period=public_transport_period,
+        )
         results[v_info['name']] = res
 
     # Вывод итогов
@@ -146,6 +169,23 @@ if __name__ == "__main__":
     )
     parser.add_argument("--duration", type=int, default=3600)
     parser.add_argument("--period", type=float, default=0.4)
+    parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Пешеходы в симуляции (см. train.py)",
+    )
+    parser.add_argument("--pedestrian-period", type=float, default=None, metavar="SEC")
+    parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Автобусы (vclass=bus)",
+    )
+    parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+    )
     args = parser.parse_args()
 
     from src.logging_config import configure_logging
@@ -153,5 +193,12 @@ if __name__ == "__main__":
     configure_logging()
 
     run_comprehensive_benchmark(
-        args.checkpoint, args.map, args.duration, args.period
+        args.checkpoint,
+        args.map,
+        args.duration,
+        args.period,
+        enable_pedestrians=args.with_pedestrians,
+        pedestrian_period=args.pedestrian_period,
+        enable_public_transport=args.with_public_transport,
+        public_transport_period=args.public_transport_period,
     )

@@ -15,7 +15,7 @@ from src.rl.obs_salience import (
     mean_abs_saliency_across_tls,
     observation_saliency_logp_gradient,
 )
-from src.simulation.env import MultiAgentTrafficEnv
+from src.simulation.env import MultiAgentTrafficEnv, traffic_env_config
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,11 @@ def run_sumo_freerun(
     duration: int,
     period: float,
     gui: bool,
+    *,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
 ) -> None:
     """
     SUMO со случайным трафиком без RL: фазы светофоров не переключаются (действие 0 на всех TLS).
@@ -44,12 +49,16 @@ def run_sumo_freerun(
     """
 
     env = MultiAgentTrafficEnv(
-        {
-            "net_file": sumo_net_xml_path,
-            "traffic_period": period,
-            "duration": duration,
-            "gui": gui,
-        }
+        traffic_env_config(
+            sumo_net_xml_path,
+            traffic_period=period,
+            duration=duration,
+            gui=gui,
+            enable_pedestrians=enable_pedestrians,
+            pedestrian_period=pedestrian_period,
+            enable_public_transport=enable_public_transport,
+            public_transport_period=public_transport_period,
+        )
     )
     obs, _info = env.reset()
     total_reward = 0.0
@@ -84,6 +93,10 @@ def run_inference(
     period: float,
     gui: bool,
     *,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
     explain_obs_every: int | None = None,
     explain_tls_limit: int = 2,
     tensorboard_dir: str | None = None,
@@ -122,12 +135,16 @@ def run_inference(
         )
 
     # 4. Создание среды для демонстрации
-    env_config = {
-        "net_file": sumo_net_xml_path,
-        "traffic_period": period,
-        "duration": duration,
-        "gui": gui
-    }
+    env_config = traffic_env_config(
+        sumo_net_xml_path,
+        traffic_period=period,
+        duration=duration,
+        gui=gui,
+        enable_pedestrians=enable_pedestrians,
+        pedestrian_period=pedestrian_period,
+        enable_public_transport=enable_public_transport,
+        public_transport_period=public_transport_period,
+    )
     env = MultiAgentTrafficEnv(env_config)
 
     obs, info = env.reset()
@@ -250,6 +267,30 @@ if __name__ == "__main__":
     )
     parser.add_argument("--duration", type=int, default=3600, help="Длительность (сек)")
     parser.add_argument("--period", type=float, default=0.4, help="Интенсивность трафика")
+    parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Добавить пешеходов (нужны пешеходные рёбра в .net.xml)",
+    )
+    parser.add_argument(
+        "--pedestrian-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал появления пешеходов (по умолчанию ~2× --period)",
+    )
+    parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Добавить автобусы (vclass=bus) как упрощённый ОТ",
+    )
+    parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал рейсов ОТ (по умолчанию ~3× --period)",
+    )
 
     parser.add_argument(
         "--explain-obs-every",
@@ -293,7 +334,16 @@ if __name__ == "__main__":
     configure_logging()
 
     if args.sumo_only:
-        run_sumo_freerun(args.map, args.duration, args.period, args.gui)
+        run_sumo_freerun(
+            args.map,
+            args.duration,
+            args.period,
+            args.gui,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
+        )
     else:
         if not args.checkpoint:
             parser.error("Укажите --checkpoint или запустите с --sumo-only")
@@ -303,6 +353,10 @@ if __name__ == "__main__":
             duration=args.duration,
             period=args.period,
             gui=args.gui,
+            enable_pedestrians=args.with_pedestrians,
+            pedestrian_period=args.pedestrian_period,
+            enable_public_transport=args.with_public_transport,
+            public_transport_period=args.public_transport_period,
             explain_obs_every=args.explain_obs_every,
             explain_tls_limit=args.explain_tls_limit,
             tensorboard_dir=args.tensorboard_dir,

@@ -10,10 +10,19 @@ from ray import tune
 from ray.tune import CheckpointConfig, RunConfig
 from ray.rllib.algorithms.ppo import PPOConfig
 
-from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks
+from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks, traffic_env_config
 
 
-def run_train(sumo_net_xml_path: str, traffic_period: float, duration: int) -> None:
+def run_train(
+    sumo_net_xml_path: str,
+    traffic_period: float,
+    duration: int,
+    *,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
+) -> None:
     if not os.path.exists(sumo_net_xml_path):
         raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
 
@@ -24,11 +33,15 @@ def run_train(sumo_net_xml_path: str, traffic_period: float, duration: int) -> N
         )
         .environment(
             MultiAgentTrafficEnv,
-            env_config={
-                "net_file": sumo_net_xml_path,
-                "traffic_period": traffic_period,  # Pass period (e.g., 0.2 for heavy traffic)
-                "duration": duration,  # Simulation time (e.g., 3600s)
-            },
+            env_config=traffic_env_config(
+                sumo_net_xml_path,
+                traffic_period=traffic_period,
+                duration=duration,
+                enable_pedestrians=enable_pedestrians,
+                pedestrian_period=pedestrian_period,
+                enable_public_transport=enable_public_transport,
+                public_transport_period=public_transport_period,
+            ),
         )
         .framework("torch")
         .env_runners(
@@ -89,11 +102,43 @@ if __name__ == "__main__":
         default=3600, 
         help="Simulation duration in seconds"
     )
-    
+    parser.add_argument(
+        "--with-pedestrians",
+        action="store_true",
+        help="Добавить пешеходов (randomTrips --pedestrians; нужны тротуары в сети)",
+    )
+    parser.add_argument(
+        "--pedestrian-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал между появлением пешеходов (по умолчанию ~2× --period)",
+    )
+    parser.add_argument(
+        "--with-public-transport",
+        action="store_true",
+        help="Добавить автобусы vclass=bus как упрощённый ОТ",
+    )
+    parser.add_argument(
+        "--public-transport-period",
+        type=float,
+        default=None,
+        metavar="SEC",
+        help="Интервал рейсов ОТ (по умолчанию ~3× --period)",
+    )
+
     args = parser.parse_args()
 
     from src.logging_config import configure_logging
 
     configure_logging()
 
-    run_train(args.map, args.period, args.duration)
+    run_train(
+        args.map,
+        args.period,
+        args.duration,
+        enable_pedestrians=args.with_pedestrians,
+        pedestrian_period=args.pedestrian_period,
+        enable_public_transport=args.with_public_transport,
+        public_transport_period=args.public_transport_period,
+    )

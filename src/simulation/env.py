@@ -9,6 +9,36 @@ from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from src.simulation.runner import SumoRunner
 
 
+def traffic_env_config(
+    net_file: str,
+    *,
+    traffic_period: float = 0.5,
+    duration: int = 3600,
+    gui: bool = False,
+    enable_pedestrians: bool = False,
+    pedestrian_period: float | None = None,
+    enable_public_transport: bool = False,
+    public_transport_period: float | None = None,
+) -> dict:
+    """
+    Единый словарь для MultiAgentTrafficEnv (Ray / демо / benchmark).
+    Периоды пешеходов и ОТ по умолчанию задаются в SumoRunner, если None.
+    """
+    cfg: dict = {
+        "net_file": net_file,
+        "traffic_period": traffic_period,
+        "duration": duration,
+        "gui": gui,
+        "enable_pedestrians": enable_pedestrians,
+        "enable_public_transport": enable_public_transport,
+    }
+    if pedestrian_period is not None:
+        cfg["pedestrian_period"] = float(pedestrian_period)
+    if public_transport_period is not None:
+        cfg["public_transport_period"] = float(public_transport_period)
+    return cfg
+
+
 class TrafficCallbacks(DefaultCallbacks):
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         last_info = episode.last_info_for("__common__")
@@ -70,6 +100,10 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.idle_steps = {}
         self.total_forced_switches = 0
         self.gui_enabled = config.get("gui", False)
+        self.enable_pedestrians = bool(config.get("enable_pedestrians", False))
+        self.enable_public_transport = bool(config.get("enable_public_transport", False))
+        self.pedestrian_period = config.get("pedestrian_period")
+        self.public_transport_period = config.get("public_transport_period")
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
@@ -79,8 +113,12 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
             pass
 
         self.runner.generate_random_traffic(
-            period=self.traffic_period, 
-            duration=self.duration
+            period=self.traffic_period,
+            duration=self.duration,
+            enable_pedestrians=self.enable_pedestrians,
+            pedestrian_period=self.pedestrian_period,
+            enable_public_transport=self.enable_public_transport,
+            public_transport_period=self.public_transport_period,
         )
         self.runner.create_config()
         

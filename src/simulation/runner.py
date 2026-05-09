@@ -41,45 +41,146 @@ class SumoRunner:
             
         self.cfg_file = os.path.join(self.worker_dir, "sim.sumocfg")
         self.rou_file = os.path.join(self.worker_dir, "routes.rou.xml")
+        self.ped_rou_file = os.path.join(self.worker_dir, "pedestrians.rou.xml")
+        self.pt_rou_file = os.path.join(self.worker_dir, "public_transport.rou.xml")
         self.port = port
+        self.simulation_duration = 3600
+        self._include_pedestrians = False
+        self._include_public_transport = False
 
-    def generate_random_traffic(self, period=0.5, duration=3600):   
-        random_trips = os.path.join(os.environ['SUMO_HOME'], 'tools', 'randomTrips.py')
-        
-        cmd = [
-            "python3", random_trips,
-            "-n", self.net_file,
-            "-p", str(period),
-            "-e", str(duration),
-            "-o", self.rou_file,
-            "--route-file", self.rou_file,
+    def _build_random_trips_cmd(
+        self,
+        out_routes: str,
+        period: float,
+        duration: int,
+        *,
+        vclass: str | None = "passenger",
+        pedestrians: bool = False,
+    ) -> list[str]:
+        random_trips = os.path.join(os.environ["SUMO_HOME"], "tools", "randomTrips.py")
+        cmd: list[str] = [
+            "python3",
+            random_trips,
+            "-n",
+            self.net_file,
+            "-p",
+            str(period),
+            "-e",
+            str(duration),
+            "-o",
+            out_routes,
+            "--route-file",
+            out_routes,
             "--validate",
-            "--fringe-factor", "10",
+            "--fringe-factor",
+            "10",
             "--remove-loops",
-            "--vclass", "passenger",
             "--random",
-            "-t", 'departLane="best" departSpeed="0" departPos="base"',
+            "-t",
+            'departLane="best" departSpeed="0" departPos="base"',
         ]
+        if pedestrians:
+            cmd.append("--pedestrians")
+        else:
+            cmd.extend(["--vclass", vclass or "passenger"])
+        return cmd
+
+    def _run_random_trips(
+        self, cmd: list[str], *, label: str, empty_fallback_path: str
+    ) -> bool:
         try:
-            # Используем shell=False для безопасности
             subprocess.run(cmd, check=True, capture_output=True, text=True)
-            logger.info("Маршруты сгенерированы: %s", self.rou_file)
+            logger.info("SUMO %s: маршруты записаны", label)
+            return True
         except subprocess.CalledProcessError as e:
-            logger.error("randomTrips не удался: %s", e.stderr or e)
-            with open(self.rou_file, "w") as f:
-                f.write('<routes></routes>')
+            logger.error(
+                "randomTrips (%s) не удался: %s",
+                label,
+                (e.stderr or str(e)).strip(),
+            )
+            with open(empty_fallback_path, "w", encoding="utf-8") as f:
+                f.write("<routes></routes>")
+            return False
+
+    def generate_random_traffic(
+        self,
+        period=0.5,
+        duration=3600,
+        *,
+        enable_pedestrians=False,
+        pedestrian_period=None,
+        enable_public_transport=False,
+        public_transport_period=None,
+    ):
+        """
+        Генерация маршрутов для легкового трафика; опционально пешеходы (--pedestrians)
+        и наземный ОТ (класс vclass=bus). Сеть должна содержать подходящие рёбра
+        (тротуары для людей); иначе randomTrips может завершиться с ошибкой —
+        тогда соответствующий файл будет пустым и не подключается к sumocfg.
+        """
+        self.simulation_duration = int(duration)
+        self._include_pedestrians = False
+        self._include_public_transport = False
+
+        veh_cmd = self._build_random_trips_cmd(
+            self.rou_file, period, duration, pedestrians=False, vclass="passenger"
+        )
+        if not self._run_random_trips(veh_cmd, label="легковой трафик", empty_fallback_path=self.rou_file):
+            logger.info("Маршруты легкового транспорта: пустой файл (fallback)")
+
+        if enable_pedestrians:
+            p_period = (
+                float(pedestrian_period)
+                if pedestrian_period is not None
+                else max(period * 2.0, 1.0)
+            )
+            ped_cmd = self._build_random_trips_cmd(
+                self.ped_rou_file,
+                p_period,
+                duration,
+                pedestrians=True,
+            )
+            if self._run_random_trips(
+                ped_cmd, label="пешеходы", empty_fallback_path=self.ped_rou_file
+            ):
+                self._include_pedestrians = True
+
+        if enable_public_transport:
+            pt_period = (
+                float(public_transport_period)
+                if public_transport_period is not None
+                else max(period * 3.0, 2.0)
+            )
+            pt_cmd = self._build_random_trips_cmd(
+                self.pt_rou_file,
+                pt_period,
+                duration,
+                pedestrians=False,
+                vclass="bus",
+            )
+            if self._run_random_trips(
+                pt_cmd, label="общественный транспорт (bus)", empty_fallback_path=self.pt_rou_file
+            ):
+                self._include_public_transport = True
 
     def create_config(self):
+        route_parts = [os.path.abspath(self.rou_file)]
+        if self._include_pedestrians:
+            route_parts.append(os.path.abspath(self.ped_rou_file))
+        if self._include_public_transport:
+            route_parts.append(os.path.abspath(self.pt_rou_file))
+        route_files_value = ",".join(route_parts)
+        end_t = int(self.simulation_duration)
         # Используем абсолютные пути, чтобы SUMO точно нашел файлы
         config_content = f"""
         <configuration>
             <input>
                 <net-file value="{os.path.abspath(self.net_file)}"/>
-                <route-files value="{os.path.abspath(self.rou_file)}"/>
+                <route-files value="{route_files_value}"/>
             </input>
             <time>
                 <begin value="0"/>
-                <end value="3600"/>
+                <end value="{end_t}"/>
                 <step-length value="1.0"/>
             </time>
             <processing>
