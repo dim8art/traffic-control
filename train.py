@@ -1,5 +1,8 @@
-import os
+from __future__ import annotations
+
 import argparse
+import os
+
 import numpy as np
 from gymnasium import spaces
 
@@ -8,9 +11,9 @@ from ray.tune import CheckpointConfig, RunConfig
 from ray.rllib.algorithms.ppo import PPOConfig
 
 from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks
-from src.simulation.runner import SumoRunner
 
-def run_train(sumo_net_xml_path, traffic_period, duration):
+
+def run_train(sumo_net_xml_path: str, traffic_period: float, duration: int) -> None:
     if not os.path.exists(sumo_net_xml_path):
         raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
 
@@ -88,4 +91,9 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
+
+    from src.logging_config import configure_logging
+
+    configure_logging()
+
     run_train(args.map, args.period, args.duration)

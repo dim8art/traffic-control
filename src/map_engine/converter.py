@@ -1,12 +1,15 @@
-import subprocess
-import os
+from __future__ import annotations
+
 import logging
+import os
+import subprocess
 
 logger = logging.getLogger(__name__)
 
+
 class MapConverter:
     @staticmethod
-    def osm_to_sumo(input_path, output_filename, *, fast: bool = False):
+    def osm_to_sumo(input_path: str, output_filename: str, *, fast: bool = False) -> str | None:
         """OSM/XML → SUMO .net.xml. ``fast=true`` упрощает сеть и ускоряет netconvert."""
 
         output_dir = "data/sumo"
@@ -47,9 +50,9 @@ class MapConverter:
         
         try:
             subprocess.run(command, check=True)
-            logger.info(f"Successfully converted to SUMO: {output_path}")
+            logger.info("SUMO-сеть сохранена: %s", output_path)
             return output_path
         except Exception as e:
-            logger.error(f"Conversion failed: {e}")
+            logger.error("Ошибка netconvert/SUMO: %s", e)
             return None
     

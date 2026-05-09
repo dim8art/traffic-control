@@ -32,6 +32,8 @@ queue.xml
 
 # --- Data & Maps ---
 data/
+*pdf
+
 # *.osm
 
 # --- IDEs & OS ---

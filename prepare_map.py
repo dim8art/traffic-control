@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import argparse
+import logging
 import os
 import sys
 
@@ -9,6 +12,8 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "src"))
 
 from src.map_engine.extractor import MapExtractor
 from src.map_engine.converter import MapConverter
+
+logger = logging.getLogger(__name__)
 
 KRESTOVSKY_POLY = (
     "30.200,59.970;30.210,59.983;30.245,59.985;30.275,59.980;30.280,59.975;30.275,59.967;30.250,59.962;30.220,59.962;30.200,59.970"
@@ -105,7 +110,7 @@ def main(
     os.makedirs("data/sumo", exist_ok=True)
 
     if not os.path.isfile(os.path.expanduser(map_path)):
-        print(f"Error: map file not found: {map_path}")
+        logger.error("Файл карты не найден: %s", map_path)
         return
 
     target_polygon: Polygon | None = None
@@ -115,34 +120,50 @@ def main(
 
     mode_count = sum(x is not None for x in (bbox, polygon_coords, area))
     if mode_count != 1:
-        print("Internal error: exactly one of bbox, polygon, or area must be set.")
+        logger.error("Внутренняя ошибка: должен быть задан ровно один из bbox / polygon / area.")
         return
 
     if area is not None:
         if area not in NAMED_AREAS:
-            print(f"Unknown --area {area!r}. Choose from: {sorted(NAMED_AREAS)}")
+            logger.error(
+                "Неизвестная зона --area=%r; доступные: %s",
+                area,
+                sorted(NAMED_AREAS),
+            )
             return
         try:
             target_polygon = _polygon_from_string(NAMED_AREAS[area])
         except ValueError as e:
-            print(f"Error parsing built-in polygon for area {area!r}: {e}")
+            logger.error("Ошибка разбора встроенного полигона для %r: %s", area, e)
             return
-        print(f"Область пресета: {AREA_LABELS.get(area, area)} ({area})")
+        logger.info(
+            "Пресет: %s (%s)",
+            AREA_LABELS.get(area, area),
+            area,
+        )
     elif polygon_coords is not None:
         try:
             target_polygon = _polygon_from_string(polygon_coords)
-            print(f"Using custom polygon with {len(target_polygon.exterior.coords)} vertices")
+            logger.info(
+                "Задан полигон, вершин: %s",
+                len(target_polygon.exterior.coords),
+            )
         except Exception as e:
-            print(f"Error parsing polygon: {e}")
+            logger.error("Ошибка разбора полигона: %s", e)
             return
     else:
         assert bbox is not None
         lat_f, lon_f, r_f = bbox
         lat, lon = float(lat_f), float(lon_f)
         radius = float(r_f)
-        print(f"Truncation: center ({lat}, {lon}), radius {radius} m")
+        logger.info(
+            "Обрезка: центр (%.6f, %.6f), радиус %.0f м",
+            lat,
+            lon,
+            radius,
+        )
 
-    print(f"--- Processing: {name} (source map: {map_path}) ---")
+    logger.info("Обработка: name=%s, источник=%s", name, map_path)
 
     extractor = MapExtractor(
         file_path=os.path.expanduser(map_path),
@@ -155,9 +176,9 @@ def main(
     graph, signals = extractor.download_and_process()
 
     if graph is None or len(graph.nodes) == 0:
-        print(
-            "Error: empty graph after load/truncate. "
-            "Check that the bbox/polygon overlaps your local extract."
+        logger.error(
+            "Пустой граф после загрузки/обрезки. Проверьте, что bbox/полигон пересекается "
+            "с вашим локальным фрагментом карты.",
         )
         return
 
@@ -165,18 +186,18 @@ def main(
         extractor.visualize_with_signals(save_path=f"data/network/{name}_preview.svg")
 
     extractor.save_osm_xml(name)
-    print(f"OSM XML saved. Found {len(signals)} traffic signals (TLS).")
+    logger.info("OSM сохранён, светофоров (TLS): %s", len(signals))
 
-    print("Converting to SUMO format...")
+    logger.info("Конвертация в SUMO…")
     converter = MapConverter()
     success = converter.osm_to_sumo(
         input_path=osm_xml_path, output_filename=name, fast=fast
     )
 
     if success:
-        print(f"Success: Network '{name}' is ready at data/sumo/{name}.net.xml")
+        logger.info("Готово: сеть data/sumo/%s.net.xml", name)
     else:
-        print("Error: SUMO conversion failed.")
+        logger.error("Конвертация SUMO завершилась с ошибкой.")
 
 
 def register_prepare_arguments(parser: argparse.ArgumentParser) -> None:
@@ -246,6 +267,9 @@ def run_prepare_from_args(args: argparse.Namespace) -> None:
 
 
 if __name__ == "__main__":
+    from src.logging_config import configure_logging
+
+    configure_logging()
     parser = _build_prepare_parser(
         "Локальный OSM/PBF/graphml → обрезка → SUMO .net.xml (без загрузки из сети)"
     )

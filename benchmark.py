@@ -1,19 +1,27 @@
+from __future__ import annotations
+
 import argparse
+import logging
 import os
-import ray
-import traci
 import subprocess
+
 import numpy as np
 import pandas as pd
+import ray
+import traci
 from ray.rllib.algorithms.algorithm import Algorithm
+
 from src.simulation.env import MultiAgentTrafficEnv
 
-def generate_net_variant(base_net, variant_type, output_net):
+logger = logging.getLogger(__name__)
+
+
+def generate_net_variant(base_net: str, variant_type: str, output_net: str) -> bool:
     """
     Использует netconvert для пересборки сети с другим типом TLS.
     Типы: 'static', 'actuated', 'delay_based'
     """
-    print(f"--- Генерация варианта сети: {variant_type} ---")
+    logger.info("Генерация варианта сети TLS: %s", variant_type)
     try:
         # Утилита netconvert перенастраивает все светофоры в сети
         cmd = [
@@ -25,10 +33,17 @@ def generate_net_variant(base_net, variant_type, output_net):
         subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         return True
     except Exception as e:
-        print(f"Ошибка при генерации {variant_type}: {e}")
+        logger.error("Не удалось сгенерировать %s: %s", variant_type, e)
         return False
 
-def get_metrics(algo, sumo_net_xml_path, duration, period, is_ppo=False):
+def get_metrics(
+    algo: Algorithm | None,
+    sumo_net_xml_path: str,
+    duration: int,
+    period: float,
+    *,
+    is_ppo: bool = False,
+) -> dict[str, float]:
     """Запуск симуляции для конкретного файла сети"""
     env_config = {
         "net_file": sumo_net_xml_path,
@@ -71,7 +86,12 @@ def get_metrics(algo, sumo_net_xml_path, duration, period, is_ppo=False):
         "Wait Time (s)": np.mean(waiting_times) if waiting_times else 0
     }
 
-def run_comprehensive_benchmark(checkpoint_path, base_sumo_net_xml, duration, period):
+def run_comprehensive_benchmark(
+    checkpoint_path: str,
+    base_sumo_net_xml: str,
+    duration: int,
+    period: float,
+) -> None:
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, logging_level="ERROR")
 
@@ -90,7 +110,7 @@ def run_comprehensive_benchmark(checkpoint_path, base_sumo_net_xml, duration, pe
     results = {}
 
     for v_id, v_info in variants.items():
-        print(f"\n>>> Тестирование: {v_info['name']}")
+        logger.info("Тестирование: %s", v_info["name"])
         
         # Для PPO и Static используем базовую сеть, для остальных — генерируем новую
         current_net = base_sumo_net_xml
@@ -99,7 +119,7 @@ def run_comprehensive_benchmark(checkpoint_path, base_sumo_net_xml, duration, pe
             if generate_net_variant(base_sumo_net_xml, v_id, variant_net):
                 current_net = variant_net
             else:
-                print(f"Пропуск {v_id}, не удалось пересобрать сеть.")
+                logger.warning("Пропуск %s: пересборка сети не удалась.", v_id)
                 continue
 
         res = get_metrics(algo, current_net, duration, period, is_ppo=v_info['ppo'])
@@ -107,10 +127,8 @@ def run_comprehensive_benchmark(checkpoint_path, base_sumo_net_xml, duration, pe
 
     # Вывод итогов
     df = pd.DataFrame(results).T.round(3)
-    print("\n" + "="*80)
-    print("ИТОГОВОЕ СРАВНЕНИЕ АЛГОРИТМОВ (С ПЕРЕСБОРКОЙ СЕТИ)")
-    print("="*80)
-    print(df)
+    sep = "=" * 80
+    logger.info("%s\nИтог benchmark (пересборка сетей)\n%s\n\n%s", sep, sep, df)
     
     # Очистка временных файлов
     for v_id in ["actuated", "delay_based"]:
@@ -129,6 +147,10 @@ if __name__ == "__main__":
     parser.add_argument("--duration", type=int, default=3600)
     parser.add_argument("--period", type=float, default=0.4)
     args = parser.parse_args()
+
+    from src.logging_config import configure_logging
+
+    configure_logging()
 
     run_comprehensive_benchmark(
         args.checkpoint, args.map, args.duration, args.period

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import argparse
 import sys
 
@@ -72,6 +74,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from src.logging_config import configure_logging
+
+    configure_logging()
+
     if len(sys.argv) == 1:
         from tui import run_tui
 

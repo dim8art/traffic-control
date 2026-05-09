@@ -6,20 +6,19 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Optional, Tuple
 
 import questionary
 from questionary import Choice
 
 
-def _abspath(raw: Optional[str]) -> Optional[str]:
+def _abspath(raw: str | None) -> str | None:
     if raw is None:
         return None
     raw = raw.strip()
     return os.path.abspath(os.path.expanduser(raw)) if raw else None
 
 
-def _prompt_text(title: str, default: Optional[str] = None) -> Optional[str]:
+def _prompt_text(title: str, default: str | None = None) -> str | None:
     return questionary.text(title, default=default or "").ask()
 
 
@@ -41,7 +40,7 @@ def _prompt_float(title: str, default: str) -> float:
         return float(default)
 
 
-def _prompt_existing_path(title: str) -> Optional[str]:
+def _prompt_existing_path(title: str) -> str | None:
     raw = questionary.path(title).ask()
     path = _abspath(raw)
     if path is None:
@@ -79,9 +78,9 @@ def _loop_prepare() -> None:
     if mode is None or mode == "Назад":
         return
 
-    bbox: Optional[Tuple[float, float, float]] = None
-    polygon_coords: Optional[str] = None
-    area: Optional[str] = None
+    bbox: tuple[float, float, float] | None = None
+    polygon_coords: str | None = None
+    area: str | None = None
     name_default = "network"
 
     if mode == "Центр и радиус":
@@ -226,16 +225,19 @@ def run_tui() -> None:
             return
 
         try:
-            if choice == "Подготовка сети":
-                _loop_prepare()
-            elif choice == "Обучение":
-                _loop_train()
-            elif choice == "Запуск в SUMO (модель)":
-                _loop_demo()
-            elif choice == "SUMO без модели":
-                _loop_sumo_freerun()
-            elif choice == "Сравнение режимов":
-                _loop_benchmark()
+            match choice:
+                case "Подготовка сети":
+                    _loop_prepare()
+                case "Обучение":
+                    _loop_train()
+                case "Запуск в SUMO (модель)":
+                    _loop_demo()
+                case "SUMO без модели":
+                    _loop_sumo_freerun()
+                case "Сравнение режимов":
+                    _loop_benchmark()
+                case _:
+                    pass
         except KeyboardInterrupt:
             questionary.print("\nОтменено.")
             continue

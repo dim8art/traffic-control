@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import logging
 import os
 import shutil
@@ -8,14 +10,13 @@ from pathlib import Path
 import networkx as nx
 import osmnx as ox
 from shapely import box
+from shapely.geometry import Polygon
 
-ox.settings.log_console = True
+ox.settings.log_console = False
 ox.settings.use_cache = True
 ox.settings.requests_timeout = 300
 ox.settings.all_oneway = True
 
-# Configure logging for better debugging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Запас по границе bbox для osmium extract (~200 м в широте Петербурга)
@@ -165,13 +166,13 @@ def load_osm_drive_graph(
 class MapExtractor:
     def __init__(
         self,
-        file_path=None,
-        location=None,
-        dist=None,
-        polygon=None,
-        network_type="drive",
+        file_path: str | None = None,
+        location: tuple[float, float] | None = None,
+        dist: int | float | None = None,
+        polygon: Polygon | None = None,
+        network_type: str = "drive",
         fast_prepare: bool = False,
-    ):
+    ) -> None:
         self.file_path = file_path
         self.location = location
         self.dist = dist
@@ -187,7 +188,7 @@ class MapExtractor:
         try:
             if not self.file_path or not os.path.exists(self.file_path):
                 logger.error(
-                    "Local map file_path is required and must exist (no network downloads)."
+                    "Нужен существующий локальный файл карты (облачная загрузка отключена).",
                 )
                 return None, None
 
@@ -236,11 +237,10 @@ class MapExtractor:
                 self.graph = full_graph
 
         except Exception as e:
-            logger.error(f"Failed to process map data: {e}")
+            logger.error("Ошибка при обработке карты: %s", e)
             return None, None
 
-        # Extract traffic signals from the processed graph
-        logger.info("Filtering traffic signal nodes...")
+        logger.info("Выбор узлов светофоров…")
         nodes, _ = ox.graph_to_gdfs(self.graph)
         
         if 'highway' in nodes.columns:
@@ -256,7 +256,7 @@ class MapExtractor:
         else:
             self.signals = []
 
-        logger.info(f"Graph nodes: {len(self.graph.nodes)}")
+        logger.info("Узлов в графе: %s", len(self.graph.nodes))
         return self.graph, self.signals
 
     def get_adjacency_list(self):
@@ -283,12 +283,12 @@ class MapExtractor:
         
         filepath = os.path.join(output_dir, f"{filename}.osm")
         ox.save_graph_xml(self.graph, filepath)
-        logger.info(f"OSM XML saved to: {filepath}")
+        logger.info("Сохранён OSM XML: %s", filepath)
         return filepath
 
     def visualize_with_signals(self, save_path=None):
         if self.graph is None or len(self.graph.nodes) == 0:
-            logger.error("Graph is empty.")
+            logger.error("Граф пуст.")
             return
 
         node_colors = []
@@ -328,7 +328,7 @@ class MapExtractor:
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 fig.savefig(save_path, format='svg' if save_path.endswith('.svg') else 'png')
                 plt.close(fig)
-                logger.info(f"Preview saved to {save_path}")
-                
+                logger.info("Превью сохранено: %s", save_path)
+
         except Exception as e:
-            logger.error(f"Error while saving the graph {e}")
+            logger.error("Ошибка при сохранении превью графа: %s", e)

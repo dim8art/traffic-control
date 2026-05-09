@@ -6,10 +6,8 @@ from ray.rllib.env.multi_agent_env import MultiAgentEnv
 import numpy as np
 import traci
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
-import logging
-
 from src.simulation.runner import SumoRunner
-logger = logging.getLogger(__name__)
+
 
 class TrafficCallbacks(DefaultCallbacks):
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
@@ -51,7 +49,7 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         # Maximum number of decision steps without phase change for each TLS.
         self.max_idle_decision_steps = int(config.get("max_idle_decision_steps", 8))
 
-        worker_index = config.worker_index if hasattr(config, "worker_index") else 0
+        worker_index = getattr(config, "worker_index", 0)
         self.worker_id = f"worker_{worker_index}"
         self.worker_port = 9000 + worker_index
         
@@ -75,9 +73,9 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
-        try: 
+        try:
             traci.close(self.runner.unique_id)
-        except: 
+        except Exception:
             pass
 
         self.runner.generate_random_traffic(

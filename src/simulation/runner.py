@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
@@ -8,18 +10,26 @@ import logging
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
-if 'SUMO_HOME' in os.environ:
-    tools = os.path.join(os.environ['SUMO_HOME'], 'tools')
+if "SUMO_HOME" in os.environ:
+    tools = os.path.join(os.environ["SUMO_HOME"], "tools")
     sys.path.append(tools)
 else:
-    sys.exit("Please declare environment variable 'SUMO_HOME'")
+    logging.getLogger(__name__).error(
+        "Нужна переменная окружения SUMO_HOME (корень установки SUMO).",
+    )
+    sys.exit(1)
 
 logger = logging.getLogger(__name__)
 
-logger = logging.getLogger(__name__)
 
 class SumoRunner:
-    def __init__(self, net_file, output_dir="data/sumo", unique_id="default", port=8813):
+    def __init__(
+        self,
+        net_file: str,
+        output_dir: str = "data/sumo",
+        unique_id: str = "default",
+        port: int = 8813,
+    ) -> None:
         # Создаем персональную подпапку для воркера, чтобы файлы не перемешивались
         self.worker_dir = os.path.join(os.path.abspath(output_dir), f"run_{unique_id}")
         os.makedirs(self.worker_dir, exist_ok=True)
@@ -53,9 +63,9 @@ class SumoRunner:
         try:
             # Используем shell=False для безопасности
             subprocess.run(cmd, check=True, capture_output=True, text=True)
-            logger.info(f"Traffic generated: {self.rou_file}")
+            logger.info("Маршруты сгенерированы: %s", self.rou_file)
         except subprocess.CalledProcessError as e:
-            logger.error(f"Duarouter failed! {e.stderr}")
+            logger.error("randomTrips не удался: %s", e.stderr or e)
             with open(self.rou_file, "w") as f:
                 f.write('<routes></routes>')
 
@@ -116,7 +126,7 @@ class SumoRunner:
         traci.start([sumo_binary, "-c", self.cfg_file])
         
         tls_ids = traci.trafficlight.getIDList()
-        logger.info(f"All traffic lights available: {tls_ids}")
+        logger.info("Светофоры по ID: %s", tls_ids)
 
         step = 0
         while traci.simulation.getMinExpectedNumber() > 0:
@@ -129,9 +139,11 @@ class SumoRunner:
                     if waiting_count > 0:
                         if log_traffic:
                             logger.info(
-                                f"Step {step} | Tls {tls_id}: "
-                                f"queue: {waiting_count} cars, "
-                                f"avg speed: {avg_speed:.2f} m/s"
+                                "Шаг %s | TLS %s | очередь: %s ТС | Vср=%.2f м/с",
+                                step,
+                                tls_id,
+                                waiting_count,
+                                avg_speed,
                             )
             
             step += 1
