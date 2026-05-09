@@ -5,6 +5,7 @@ from src.map_engine.extractor import MapExtractor
 
 
 def test_get_adjacency_list_for_signals():
+    """Соседство светофоров для графа: из узлов-сигналов строится adjacency для multi-agent наблюдений."""
     extractor = MapExtractor(location=(59.9, 30.3), dist=200)
     graph = nx.MultiDiGraph()
     graph.add_edge(1, 2)
