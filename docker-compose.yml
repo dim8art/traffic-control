@@ -1,0 +1,19 @@
+services:
+  traffic-control:
+    build: .
+    image: traffic-control:latest
+    working_dir: /app
+    # Ray + несколько SUMO-воркеров; при OOM увеличьте (на сервере 32 ГБ можно 4g–8g)
+    shm_size: "4gb"
+    environment:
+      SUMO_HOME: /usr/share/sumo
+    volumes:
+      - ./data:/app/data
+      - ./ray_results:/app/ray_results
+      - ./checkpoints:/app/checkpoints
+    # SUMO >= 1.18 (PPA в образе). Примеры:
+    #   docker compose build
+    #   docker compose run --rm traffic-control sumo --map data/sumo/vasilevsky.net.xml --no-gui
+    #   docker compose run --rm traffic-control train --map data/sumo/vasilevsky.net.xml
+    stdin_open: true
+    tty: true

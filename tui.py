@@ -40,6 +40,110 @@ def _prompt_float(title: str, default: str) -> float:
         return float(default)
 
 
+def _prompt_simulation_traffic_extras() -> dict[str, object] | None:
+    """
+    Пешеходы / ОТ — те же опции, что --with-pedestrians и --with-public-transport в CLI.
+    Возвращает None, если пользователь прервал подтверждение.
+    """
+    ped = questionary.confirm(
+        "Добавить пешеходов (нужна пешеходная сеть в .net.xml)?",
+        default=False,
+    ).ask()
+    if ped is None:
+        return None
+    pt = questionary.confirm(
+        "Добавить общественный транспорт (автобусы, vclass=bus)?",
+        default=False,
+    ).ask()
+    if pt is None:
+        return None
+
+    ped_period: float | None = None
+    if ped:
+        custom = questionary.confirm(
+            "Задать интервал пешеходов вручную (иначе от автоматического правила)?",
+            default=False,
+        ).ask()
+        if custom is None:
+            return None
+        if custom:
+            ped_period = _prompt_float("Интервал между пешеходами, с", "2.0")
+
+    pt_period: float | None = None
+    if pt:
+        custom = questionary.confirm(
+            "Задать интервал автобусов вручную?",
+            default=False,
+        ).ask()
+        if custom is None:
+            return None
+        if custom:
+            pt_period = _prompt_float("Интервал рейсов ОТ, с", "3.0")
+
+    return {
+        "enable_pedestrians": bool(ped),
+        "enable_public_transport": bool(pt),
+        "pedestrian_period": ped_period,
+        "public_transport_period": pt_period,
+    }
+
+
+def _prompt_reward_extras() -> dict[str, object] | None:
+    """reward_mode и опционально ped_reward_weight для *_sidewalk."""
+    from src.simulation.env import REWARD_MODES
+
+    choices = [Choice(title=rm, value=rm) for rm in REWARD_MODES]
+    rm = questionary.select(
+        "Режим награды",
+        choices=choices,
+        default="pressure",
+    ).ask()
+    if rm is None:
+        return None
+    ped_w = None
+    if "sidewalk" in str(rm):
+        custom = questionary.confirm(
+            "Задать вес пешеходов вручную (иначе по умолчанию 1.0)?",
+            default=False,
+        ).ask()
+        if custom is None:
+            return None
+        if custom:
+            ped_w = _prompt_float("Вес пешеходов", "1.0")
+    return {"reward_mode": rm, "ped_reward_weight": ped_w}
+
+
+def _prompt_demo_saliency() -> dict[str, object] | None:
+    """Опции saliency для run_inference (консоль и при желании TensorBoard)."""
+    use = questionary.confirm(
+        "Saliency: печать |∂log π/∂obs| по наблюдению в консоль?",
+        default=False,
+    ).ask()
+    if use is None:
+        return None
+    out: dict[str, object] = {
+        "explain_obs_every": None,
+        "explain_tls_limit": 2,
+        "tensorboard_dir": None,
+        "tensorboard_saliency_every": 1,
+    }
+    if use:
+        out["explain_obs_every"] = _prompt_int("Печатать saliency каждые N шагов RL", "1")
+        out["explain_tls_limit"] = _prompt_int(
+            "Не больше скольких светофоров выводить за шаг", "2"
+        )
+        tb = questionary.confirm("Дополнительно: писать saliency в TensorBoard?", default=False).ask()
+        if tb is None:
+            return None
+        if tb:
+            raw_dir = _prompt_text("Каталог TensorBoard", "runs/saliency_demo")
+            out["tensorboard_dir"] = (raw_dir or "").strip() or "runs/saliency_demo"
+            out["tensorboard_saliency_every"] = _prompt_int(
+                "Запись в TensorBoard каждые N шагов RL", "1"
+            )
+    return out
+
+
 def _prompt_existing_path(title: str) -> str | None:
     raw = questionary.path(title).ask()
     path = _abspath(raw)
@@ -152,8 +256,38 @@ def _loop_train() -> None:
         return
     period = _prompt_float("Интервал выпуска ТС (меньше = плотнее)", "0.5")
     duration = _prompt_int("Длительность, с", "3600")
+    traffic_extras = _prompt_simulation_traffic_extras()
+    if traffic_extras is None:
+        return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
+
+    checkpoint_path: str | None = None
+    resume = questionary.confirm(
+        "Продолжить обучение с checkpoint (Ray Tune)?",
+        default=False,
+    ).ask()
+    if resume is None:
+        return
+    if resume:
+        ckpt = _prompt_existing_path(
+            "Каталог trial (PPO_…) или checkpoint_000… в ray_results"
+        )
+        if not ckpt:
+            questionary.print("Путь не найден.")
+            return
+        checkpoint_path = ckpt
+
     questionary.print("Обучение…")
-    run_train(net_xml, period, duration)
+    run_train(
+        net_xml,
+        period,
+        duration,
+        checkpoint_path=checkpoint_path,
+        **traffic_extras,
+        **reward_extras,
+    )
 
 
 def _loop_sumo_freerun() -> None:
@@ -167,8 +301,21 @@ def _loop_sumo_freerun() -> None:
     gui = questionary.confirm("Окно SUMO?", default=True).ask()
     if gui is None:
         return
+    traffic_extras = _prompt_simulation_traffic_extras()
+    if traffic_extras is None:
+        return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     questionary.print("Симуляция…")
-    run_sumo_freerun(net_xml, duration, period, gui)
+    run_sumo_freerun(
+        net_xml,
+        duration,
+        period,
+        gui,
+        **traffic_extras,
+        **reward_extras,
+    )
 
 
 def _loop_demo() -> None:
@@ -186,8 +333,26 @@ def _loop_demo() -> None:
     gui = questionary.confirm("Окно SUMO?", default=True).ask()
     if gui is None:
         return
+    traffic_extras = _prompt_simulation_traffic_extras()
+    if traffic_extras is None:
+        return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
+    saliency_opts = _prompt_demo_saliency()
+    if saliency_opts is None:
+        return
     questionary.print("Запуск…")
-    run_inference(ckpt, net_xml, duration, period, gui)
+    run_inference(
+        ckpt,
+        net_xml,
+        duration,
+        period,
+        gui,
+        **traffic_extras,
+        **reward_extras,
+        **saliency_opts,
+    )
 
 
 def _loop_benchmark() -> None:
@@ -202,8 +367,21 @@ def _loop_benchmark() -> None:
         return
     period = _prompt_float("Интервал выпуска ТС", "0.4")
     duration = _prompt_int("Длительность, с", "3600")
+    traffic_extras = _prompt_simulation_traffic_extras()
+    if traffic_extras is None:
+        return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     questionary.print("Сравнение…")
-    run_comprehensive_benchmark(ckpt, net_xml, duration, period)
+    run_comprehensive_benchmark(
+        ckpt,
+        net_xml,
+        duration,
+        period,
+        **traffic_extras,
+        **reward_extras,
+    )
 
 
 def run_tui() -> None:
