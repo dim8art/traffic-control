@@ -1,49 +1,22 @@
-import os
-import sys
-
-# Adding the 'src' directory to the python path to import our modules
-
+import networkx as nx
+import pandas as pd
 
 from src.map_engine.extractor import MapExtractor
 
-def run_extraction_test():
-    """
-    Test the extraction of a specific district to verify OSM connection 
-    and traffic signal filtering.
-    """
-    # Using Lomonosov city center as a test
-    target_coordinates = (59.910740, 29.776466)
-    base_name = "lomonosov"
-    radius = 300
 
-    print(f"--- Starting Conversion Test: {base_name} ---")
-    
-    extractor = MapExtractor(location=target_coordinates, dist = radius)
-    
-    graph, signals = extractor.download_and_process()
-    extractor.visualize_with_signals(save_path="data/network/tests/osm_extraction/preview.png")
-    
-    if graph is None:
-        print("Test FAILED: Could not download the graph.")
-        return
+def test_get_adjacency_list_for_signals():
+    extractor = MapExtractor(location=(59.9, 30.3), dist=200)
+    graph = nx.MultiDiGraph()
+    graph.add_edge(1, 2)
+    graph.add_edge(1, 3)
+    graph.add_edge(2, 4)
 
-    num_signals = len(signals)
-    print(f"Test INFO: Found {num_signals} traffic signals in the district.")
-    
-    adj_list = extractor.get_adjacency_list()
-    if num_signals > 0:
-        first_signal_id = list(adj_list.keys())[0]
-        neighbors = adj_list[first_signal_id]
-        print(f"Test INFO: Signal ID {first_signal_id} has {len(neighbors)} adjacent nodes.")
+    extractor.graph = graph
+    extractor.signals = pd.DataFrame(index=[1, 2])
 
-    filename = "test_lomonosov_network"
-    output_path = extractor.save_graphml(filename)
-    
-    # Final verification of the file existence
-    if os.path.exists(output_path):
-        print(f"Test SUCCESS: Graph saved to {output_path}")
-    else:
-        print("Test FAILED: File was not created.")
+    adj = extractor.get_adjacency_list()
 
-if __name__ == "__main__":
-    run_extraction_test()
+    assert 1 in adj
+    assert 2 in adj
+    assert set(adj[1]) == {2, 3}
+    assert set(adj[2]) == {4}

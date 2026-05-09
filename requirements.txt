@@ -22,3 +22,5 @@ pyyaml
 matplotlib
 scipy
 duckdb
+pytest
+questionary>=2.0.0

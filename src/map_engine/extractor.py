@@ -1,7 +1,12 @@
-import osmnx as ox
-import os
 import logging
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
 
+import networkx as nx
+import osmnx as ox
 from shapely import box
 
 ox.settings.log_console = True
@@ -12,68 +17,220 @@ ox.settings.all_oneway = True
 # Configure logging for better debugging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Запас по границе bbox для osmium extract (~200 м в широте Петербурга)
+_CLIP_PAD_DEG = 0.003
+
+
+def _osmium_can_clip(path: Path) -> bool:
+    n = path.name.lower()
+    return bool(
+        n.endswith(".pbf")
+        or n.endswith(".osm.pbf")
+        or n.endswith(".osm")
+    )
+
+
+def load_graph_from_local_osm_extract(
+    file_path: str, *, simplify_xml: bool = False
+) -> nx.MultiDiGraph:
+    """Полная загрузка без пространственного пре-среза (дорого на большом PBF)."""
+
+    path = Path(file_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Network file does not exist: {path}")
+
+    name_lower = path.name.lower()
+
+    if name_lower.endswith(".graphml") or name_lower.endswith(".graphml.gz"):
+        return ox.load_graphml(path)
+
+    if name_lower.endswith(".pbf") or name_lower.endswith(".osm.pbf"):
+        osmium_bin = shutil.which("osmium")
+        if osmium_bin is None:
+            raise RuntimeError(
+                "Для .pbf нужна утилита osmium-tool (команда `osmium`): "
+                "установите пакет или сконвертируйте PBF в .osm вручную."
+            )
+
+        fd, tmp_osm = tempfile.mkstemp(suffix=".osm", prefix="osm_extract_")
+        os.close(fd)
+        logger.info("Полная конвертация PBF → OSM (osmium cat)…")
+        try:
+            subprocess.run(
+                [
+                    osmium_bin,
+                    "cat",
+                    str(path),
+                    "-o",
+                    tmp_osm,
+                    "-f",
+                    "osm",
+                    "-O",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return ox.graph_from_xml(tmp_osm, simplify=simplify_xml)
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.strip() if exc.stderr else str(exc)
+            raise RuntimeError(f"osmium завершился с ошибкой:\n{err}") from exc
+        finally:
+            try:
+                os.unlink(tmp_osm)
+            except OSError:
+                pass
+
+    return ox.graph_from_xml(path, simplify=simplify_xml)
+
+
+def load_osm_drive_graph(
+    file_path: str,
+    *,
+    clip_bbox_wsen: tuple[float, float, float, float] | None,
+    simplify_xml: bool,
+) -> nx.MultiDiGraph:
+    """
+    clip_bbox_wsen = (west, south, east, north) в градусах.
+    Если задан и есть osmium — сначала ``extract`` по bbox → меньше данных для OSMnx/netconvert.
+    """
+
+    path = Path(file_path).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"Network file does not exist: {path}")
+
+    name_lower = path.name.lower()
+
+    if name_lower.endswith(".graphml") or name_lower.endswith(".graphml.gz"):
+        if clip_bbox_wsen is not None:
+            logger.info(
+                "GraphML: пре-срез osmium недоступен, граф целиком; затем полигон в OSMnx."
+            )
+        return ox.load_graphml(path)
+
+    osmium_bin = shutil.which("osmium")
+    if (
+        clip_bbox_wsen is not None
+        and osmium_bin
+        and _osmium_can_clip(path)
+    ):
+        west, south, east, north = clip_bbox_wsen
+        fd, tmp_osm = tempfile.mkstemp(suffix=".osm", prefix="osmium_bbox_")
+        os.close(fd)
+        logger.info(
+            "Ускорение: osmium extract по bbox перед OSMnx (west,south,east,north="
+            f"{west:.5f},{south:.5f},{east:.5f},{north:.5f})…"
+        )
+        try:
+            subprocess.run(
+                [
+                    osmium_bin,
+                    "extract",
+                    "-b",
+                    f"{west},{south},{east},{north}",
+                    str(path),
+                    "-o",
+                    tmp_osm,
+                    "-f",
+                    "osm",
+                    "-O",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            return ox.graph_from_xml(tmp_osm, simplify=simplify_xml)
+        except subprocess.CalledProcessError as exc:
+            err = exc.stderr.strip() if exc.stderr else str(exc)
+            logger.warning(
+                "osmium extract не удался (%s), откат к полной загрузке файла.",
+                err[:200],
+            )
+        finally:
+            try:
+                os.unlink(tmp_osm)
+            except OSError:
+                pass
+    elif clip_bbox_wsen is not None and not osmium_bin:
+        logger.warning(
+            "osmium не найден в PATH — пре-срез по bbox пропущен (медленнее на больших PBF)."
+        )
+
+    return load_graph_from_local_osm_extract(
+        str(path), simplify_xml=simplify_xml
+    )
+
+
 class MapExtractor:
-    def __init__(self, 
-                 location=None, 
-                 dist=500, 
-                 place_name=None, 
-                 polygon=None, 
-                 file_path=None, 
-                 network_type='drive'):
-        """
-        Initialize the extractor with various data source options.
-        """
-        self.location = location      # (lat, lon) tuple
-        self.dist = dist              # distance in meters for bbox
-        self.place_name = place_name  # string, e.g., "Lomonosov, Saint Petersburg"
-        self.polygon = polygon        # shapely.geometry.Polygon object
-        self.file_path = file_path    # path to local .osm or .graphml file
+    def __init__(
+        self,
+        file_path=None,
+        location=None,
+        dist=None,
+        polygon=None,
+        network_type="drive",
+        fast_prepare: bool = False,
+    ):
+        self.file_path = file_path
+        self.location = location
+        self.dist = dist
+        self.polygon = polygon
         self.network_type = network_type
-        
+        self.fast_prepare = fast_prepare
+
         self.graph = None
         self.signals = None
 
     def download_and_process(self):
-        """
-        Loads map data based on the provided source and truncates it to the target area.
-        """
+        """Загрузка с диска, опционально с пре-срезом bbox и полигоном OSMnx."""
         try:
-            # 1. PRIORITY: Load from local file if provided
-            if self.file_path and os.path.exists(self.file_path):
-                logger.info(f"Loading base graph from local file: {self.file_path}")
-                if self.file_path.endswith('.osm'):
-                    full_graph = ox.graph_from_xml(self.file_path, simplify=False)
-                else:
-                    full_graph = ox.load_graphml(self.file_path, simplify=False)
-            
-            # 2. OPTION: Download by place name
-            elif self.place_name:
-                logger.info(f"Downloading graph for place: {self.place_name}")
-                full_graph = ox.graph_from_place(self.place_name, network_type=self.network_type, simplify=False)
-            
-            # 3. OPTION: Download by coordinates (default fallback)
-            else:
-                logger.info(f"Downloading graph around coordinates: {self.location}")
-                # Download slightly larger area to ensure clean truncation later
-                full_graph = ox.graph_from_point(self.location, dist=self.dist + 100, 
-                                               network_type=self.network_type, simplify=False)
+            if not self.file_path or not os.path.exists(self.file_path):
+                logger.error(
+                    "Local map file_path is required and must exist (no network downloads)."
+                )
+                return None, None
 
-            # --- TRUNCATION LOGIC --- 
-            
-            # Create the bounding polygon if not explicitly provided
+            simplify_xml = bool(self.fast_prepare)
+
             target_polygon = self.polygon
-            
-            if target_polygon is None and self.location and self.dist:
-                n, s, e, w = ox.utils_geo.bbox_from_point(self.location, dist=self.dist)
-                target_polygon = box(w, s, e, n)
-                logger.info(f"Created bounding box polygon for truncation (dist={self.dist}m)")
 
-            if target_polygon:
-                logger.info("Applying polygon truncation to the graph...")
+            if (
+                target_polygon is None
+                and self.location is not None
+                and self.dist is not None
+            ):
+                west, south, east, north = ox.utils_geo.bbox_from_point(
+                    self.location, dist=float(self.dist)
+                )
+                target_polygon = box(west, south, east, north)
+                logger.info(
+                    "Контур обрезки: bbox %.0f м от точки.", float(self.dist)
+                )
+
+            clip_bbox = None
+            if target_polygon is not None:
+                minx, miny, maxx, maxy = target_polygon.bounds
+                clip_bbox = (
+                    minx - _CLIP_PAD_DEG,
+                    miny - _CLIP_PAD_DEG,
+                    maxx + _CLIP_PAD_DEG,
+                    maxy + _CLIP_PAD_DEG,
+                )
+
+            logger.info(f"Чтение графа: {self.file_path}")
+            full_graph = load_osm_drive_graph(
+                self.file_path,
+                clip_bbox_wsen=clip_bbox,
+                simplify_xml=simplify_xml,
+            )
+
+            if target_polygon is not None:
+                logger.info("Точная обрезка по полигону (OSMnx)…")
                 self.graph = ox.truncate.truncate_graph_polygon(
-                    full_graph, 
-                    target_polygon, 
-                    truncate_by_edge=False
+                    full_graph,
+                    target_polygon,
+                    truncate_by_edge=True,
                 )
             else:
                 self.graph = full_graph

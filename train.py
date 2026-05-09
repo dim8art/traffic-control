@@ -10,9 +10,9 @@ from ray.rllib.algorithms.ppo import PPOConfig
 from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks
 from src.simulation.runner import SumoRunner
 
-def run_train(net_file_path, traffic_period, duration):
-    if not os.path.exists(net_file_path):
-        raise FileNotFoundError(f"Network file not found: {net_file_path}")
+def run_train(sumo_net_xml_path, traffic_period, duration):
+    if not os.path.exists(sumo_net_xml_path):
+        raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
 
     config = (
         PPOConfig()
@@ -22,7 +22,7 @@ def run_train(net_file_path, traffic_period, duration):
         .environment(
             MultiAgentTrafficEnv,
             env_config={
-                "net_file": net_file_path,
+                "net_file": sumo_net_xml_path,
                 "traffic_period": traffic_period,  # Pass period (e.g., 0.2 for heavy traffic)
                 "duration": duration,  # Simulation time (e.g., 3600s)
             },
@@ -69,10 +69,10 @@ def run_train(net_file_path, traffic_period, duration):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Start RL training for SUMO agent")
     parser.add_argument(
-        "--net", 
-        type=str, 
-        required=True, 
-        help="Path to .net.xml file"
+        "--map",
+        type=str,
+        required=True,
+        help="Путь к SUMO-сети (.net.xml), полученной через prepare",
     )
     parser.add_argument(
         "--period", 
@@ -88,4 +88,4 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    run_train(args.net, args.period, args.duration)
+    run_train(args.map, args.period, args.duration)

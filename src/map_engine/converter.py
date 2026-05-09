@@ -6,30 +6,43 @@ logger = logging.getLogger(__name__)
 
 class MapConverter:
     @staticmethod
-    def osm_to_sumo(input_path, output_filename):
-        """
-        Converts GraphML file to SUMO network format.
-        """
+    def osm_to_sumo(input_path, output_filename, *, fast: bool = False):
+        """OSM/XML → SUMO .net.xml. ``fast=true`` упрощает сеть и ускоряет netconvert."""
+
         output_dir = "data/sumo"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
             
         output_path = os.path.join(output_dir, f"{output_filename}.net.xml")
-        
-        # SUMO netconvert command
-        # --geometry.remove removes unnecessary nodes for better simulation performance
+
+        internal = "true" if fast else "false"
+        join_dist = "18" if fast else "10"
+        roundabouts = "false" if fast else "true"
+
         command = [
             "netconvert",
-            "--osm-files", input_path, 
-            "--output-file", output_path,
-            "--geometry.remove", "true",        # Удаляем лишние точки на прямых
-            "--roundabouts.guess", "true",      # Угадываем кольца
-            "--junctions.join", "true",         # Объединяем близкие перекрестки
-            "--junctions.join-dist", "10",      # Расстояние для объединения (10м)
-            "--tls.join", "true",               # Группируем светофоры (критично для RL)
-            "--no-internal-links", "false",     # Оставь false, если хочешь видеть очереди внутри
-            "--no-turnarounds", "true",         # Убираем развороты (ускоряет расчет путей)
-            "--offset.disable-normalization", "true"
+            "--no-warnings",
+            "true",
+            "--osm-files",
+            input_path,
+            "--output-file",
+            output_path,
+            "--geometry.remove",
+            "true",
+            "--roundabouts.guess",
+            roundabouts,
+            "--junctions.join",
+            "true",
+            "--junctions.join-dist",
+            join_dist,
+            "--tls.join",
+            "true",
+            "--no-internal-links",
+            internal,
+            "--no-turnarounds",
+            "true",
+            "--offset.disable-normalization",
+            "true",
         ]
         
         try:

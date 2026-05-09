@@ -28,10 +28,10 @@ def generate_net_variant(base_net, variant_type, output_net):
         print(f"Ошибка при генерации {variant_type}: {e}")
         return False
 
-def get_metrics(algo, net_file, duration, period, is_ppo=False):
+def get_metrics(algo, sumo_net_xml_path, duration, period, is_ppo=False):
     """Запуск симуляции для конкретного файла сети"""
     env_config = {
-        "net_file": net_file,
+        "net_file": sumo_net_xml_path,
         "traffic_period": period,
         "duration": duration,
         "gui": False
@@ -71,7 +71,7 @@ def get_metrics(algo, net_file, duration, period, is_ppo=False):
         "Wait Time (s)": np.mean(waiting_times) if waiting_times else 0
     }
 
-def run_comprehensive_benchmark(checkpoint_path, base_net, duration, period):
+def run_comprehensive_benchmark(checkpoint_path, base_sumo_net_xml, duration, period):
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, logging_level="ERROR")
 
@@ -93,10 +93,10 @@ def run_comprehensive_benchmark(checkpoint_path, base_net, duration, period):
         print(f"\n>>> Тестирование: {v_info['name']}")
         
         # Для PPO и Static используем базовую сеть, для остальных — генерируем новую
-        current_net = base_net
+        current_net = base_sumo_net_xml
         if v_id in ["actuated", "delay_based"]:
             variant_net = f"net_{v_id}.net.xml"
-            if generate_net_variant(base_net, v_id, variant_net):
+            if generate_net_variant(base_sumo_net_xml, v_id, variant_net):
                 current_net = variant_net
             else:
                 print(f"Пропуск {v_id}, не удалось пересобрать сеть.")
@@ -120,9 +120,16 @@ def run_comprehensive_benchmark(checkpoint_path, base_net, duration, period):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
-    parser.add_argument("--net", type=str, required=True)
+    parser.add_argument(
+        "--map",
+        type=str,
+        required=True,
+        help="Базовая SUMO-сеть (.net.xml) для сравнения",
+    )
     parser.add_argument("--duration", type=int, default=3600)
     parser.add_argument("--period", type=float, default=0.4)
     args = parser.parse_args()
 
-    run_comprehensive_benchmark(args.checkpoint, args.net, args.duration, args.period)
+    run_comprehensive_benchmark(
+        args.checkpoint, args.map, args.duration, args.period
+    )
