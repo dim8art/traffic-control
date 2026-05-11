@@ -21,8 +21,42 @@ OBS_LABELS_6 = (
     "neighbor_upstream_w",
 )
 
+# Суффиксы в том же порядке, что и в MultiAgentTrafficEnv._get_local_obs (после базовых 6).
+OBS_LABELS_PED = ("local_ped_count", "neighbor_ped_count_w")
+OBS_LABELS_PT = ("local_halting_buses", "neighbor_halting_buses_w")
 
-def observation_feature_labels(obs_dim: int) -> tuple[str, ...]:
+
+def _extended_obs_labels(
+    *,
+    enable_pedestrians: bool,
+    enable_public_transport: bool,
+) -> tuple[str, ...]:
+    names = list(OBS_LABELS_6)
+    if enable_pedestrians:
+        names.extend(OBS_LABELS_PED)
+    if enable_public_transport:
+        names.extend(OBS_LABELS_PT)
+    return tuple(names)
+
+
+def observation_feature_labels(
+    obs_dim: int,
+    *,
+    enable_pedestrians: bool | None = None,
+    enable_public_transport: bool | None = None,
+) -> tuple[str, ...]:
+    """
+    Имена компонентов наблюдения. Без флагов поведение как раньше: после 6 базовых — f6, f7, …
+    С флагами — осмысленные имена для блоков пешеходов и ОТ (размер должен совпадать с env).
+    """
+    if enable_pedestrians is not None or enable_public_transport is not None:
+        ped = bool(enable_pedestrians)
+        pt = bool(enable_public_transport)
+        base = list(_extended_obs_labels(enable_pedestrians=ped, enable_public_transport=pt))
+        while len(base) < obs_dim:
+            base.append(f"f{len(base)}")
+        return tuple(base[:obs_dim])
+
     labels = []
     for i in range(obs_dim):
         if i < len(OBS_LABELS_6):
@@ -102,10 +136,16 @@ def format_top_saliency(
     *,
     top_k: int = 6,
     abs_values: bool = True,
+    enable_pedestrians: bool | None = None,
+    enable_public_transport: bool | None = None,
 ) -> str:
     vals = np.abs(grads) if abs_values else grads
     dim = len(vals)
-    labels = observation_feature_labels(dim)
+    labels = observation_feature_labels(
+        dim,
+        enable_pedestrians=enable_pedestrians,
+        enable_public_transport=enable_public_transport,
+    )
     order = np.argsort(-vals)
     parts = []
     for i in order[: min(top_k, dim)]:
@@ -128,10 +168,16 @@ def log_saliency_tensorboard_scalar_groups(
     mean_abs_grad_per_dim: np.ndarray,
     *,
     prefix: str = "saliency",
+    enable_pedestrians: bool | None = None,
+    enable_public_transport: bool | None = None,
 ) -> None:
     """Скаляры в TensorBoard: среднее |∂logπ/∂obs_i| по TLS и доля в сумме (Scalars)."""
     abs_vals = np.asarray(mean_abs_grad_per_dim, dtype=np.float64).flatten()
-    labels = observation_feature_labels(len(abs_vals))
+    labels = observation_feature_labels(
+        len(abs_vals),
+        enable_pedestrians=enable_pedestrians,
+        enable_public_transport=enable_public_transport,
+    )
     total = float(np.sum(abs_vals)) + 1e-12
     for i, name in enumerate(labels):
         writer.add_scalar(f"{prefix}/mean_abs/{name}", float(abs_vals[i]), global_step)

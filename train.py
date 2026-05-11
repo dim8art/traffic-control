@@ -3,14 +3,18 @@ from __future__ import annotations
 import argparse
 import os
 
-import numpy as np
 from gymnasium import spaces
 
 from ray import tune
 from ray.tune import CheckpointConfig, RunConfig
 from ray.rllib.algorithms.ppo import PPOConfig
 
-from src.simulation.env import MultiAgentTrafficEnv, TrafficCallbacks, traffic_env_config
+from src.simulation.env import (
+    MultiAgentTrafficEnv,
+    TrafficCallbacks,
+    traffic_env_config,
+    traffic_policy_observation_space,
+)
 
 
 def run_train(
@@ -26,6 +30,20 @@ def run_train(
     if not os.path.exists(sumo_net_xml_path):
         raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
 
+    env_cfg = traffic_env_config(
+        sumo_net_xml_path,
+        traffic_period=traffic_period,
+        duration=duration,
+        enable_pedestrians=enable_pedestrians,
+        pedestrian_period=pedestrian_period,
+        enable_public_transport=enable_public_transport,
+        public_transport_period=public_transport_period,
+    )
+    obs_space = traffic_policy_observation_space(
+        enable_pedestrians=enable_pedestrians,
+        enable_public_transport=enable_public_transport,
+    )
+
     config = (
         PPOConfig()
         .api_stack(
@@ -33,15 +51,7 @@ def run_train(
         )
         .environment(
             MultiAgentTrafficEnv,
-            env_config=traffic_env_config(
-                sumo_net_xml_path,
-                traffic_period=traffic_period,
-                duration=duration,
-                enable_pedestrians=enable_pedestrians,
-                pedestrian_period=pedestrian_period,
-                enable_public_transport=enable_public_transport,
-                public_transport_period=public_transport_period,
-            ),
+            env_config=env_cfg,
         )
         .framework("torch")
         .env_runners(
@@ -52,7 +62,7 @@ def run_train(
             policies={
                 "traffic_policy": (
                     None,
-                    spaces.Box(low=0, high=1000, shape=(6,), dtype=np.float32),
+                    obs_space,
                     spaces.Discrete(2),
                     {},
                 ),

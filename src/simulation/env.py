@@ -1,12 +1,37 @@
 import os
-import time
-import gymnasium as gym
 from gymnasium import spaces
 from ray.rllib.env.multi_agent_env import MultiAgentEnv
 import numpy as np
 import traci
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from src.simulation.runner import SumoRunner
+
+
+def traffic_observation_dim(
+    *,
+    enable_pedestrians: bool = False,
+    enable_public_transport: bool = False,
+) -> int:
+    """Размер вектора наблюдения агента TLS: базовые 6 + по 2 признака за пешеходов и ОТ."""
+    n = 6
+    if enable_pedestrians:
+        n += 2
+    if enable_public_transport:
+        n += 2
+    return n
+
+
+def traffic_policy_observation_space(
+    *,
+    enable_pedestrians: bool = False,
+    enable_public_transport: bool = False,
+) -> spaces.Box:
+    """Пространство наблюдений для политики Ray (должно совпадать с MultiAgentTrafficEnv)."""
+    dim = traffic_observation_dim(
+        enable_pedestrians=enable_pedestrians,
+        enable_public_transport=enable_public_transport,
+    )
+    return spaces.Box(low=0.0, high=1000.0, shape=(dim,), dtype=np.float32)
 
 
 def traffic_env_config(
@@ -89,9 +114,21 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
             port=self.worker_port,
         )
 
+        self.enable_pedestrians = bool(config.get("enable_pedestrians", False))
+        self.enable_public_transport = bool(config.get("enable_public_transport", False))
+        self.pedestrian_period = config.get("pedestrian_period")
+        self.public_transport_period = config.get("public_transport_period")
 
-        # [local_wait, local_speed, local_upstream, neigh_wait, neigh_speed, neigh_upstream]
-        self.observation_space = spaces.Box(low=0, high=1000, shape=(6,), dtype=np.float32)
+        obs_dim = traffic_observation_dim(
+            enable_pedestrians=self.enable_pedestrians,
+            enable_public_transport=self.enable_public_transport,
+        )
+        # База: local_wait, local_speed, local_upstream, neigh_*(вес w);
+        # + пешеходы: число людей на контролируемых полосах (локально и у соседей×w);
+        # + ОТ: остановившиеся bus на въездах (локально и у соседей×w).
+        self.observation_space = spaces.Box(
+            low=0.0, high=1000.0, shape=(obs_dim,), dtype=np.float32
+        )
         self.action_space = spaces.Discrete(2)
 
         self._agent_ids = [] 
@@ -100,10 +137,6 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.idle_steps = {}
         self.total_forced_switches = 0
         self.gui_enabled = config.get("gui", False)
-        self.enable_pedestrians = bool(config.get("enable_pedestrians", False))
-        self.enable_public_transport = bool(config.get("enable_public_transport", False))
-        self.pedestrian_period = config.get("pedestrian_period")
-        self.public_transport_period = config.get("public_transport_period")
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
@@ -235,17 +268,42 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         weighted_neighbor_speed = neighbor_speed * self.neighbor_obs_weight
         weighted_neighbor_upstream = neighbor_upstream * self.neighbor_obs_weight
 
-        return np.array(
-            [
-                float(local_waiting_cars),
-                float(local_avg_speed),
-                float(local_avg_upstream),
-                float(weighted_neighbor_wait),
-                float(weighted_neighbor_speed),
-                float(weighted_neighbor_upstream),
-            ],
-            dtype=np.float32,
-        )
+        parts = [
+            float(local_waiting_cars),
+            float(local_avg_speed),
+            float(local_avg_upstream),
+            float(weighted_neighbor_wait),
+            float(weighted_neighbor_speed),
+            float(weighted_neighbor_upstream),
+        ]
+
+        if self.enable_pedestrians:
+            local_ped = float(self._collect_tls_pedestrian_count(tls_id))
+            if neighbors:
+                neigh_ped = float(
+                    np.mean(
+                        [self._collect_tls_pedestrian_count(n_id) for n_id in neighbors]
+                    )
+                )
+            else:
+                neigh_ped = 0.0
+            parts.append(local_ped)
+            parts.append(neigh_ped * self.neighbor_obs_weight)
+
+        if self.enable_public_transport:
+            local_bus = float(self._collect_tls_halting_bus_count(tls_id))
+            if neighbors:
+                neigh_bus = float(
+                    np.mean(
+                        [self._collect_tls_halting_bus_count(n_id) for n_id in neighbors]
+                    )
+                )
+            else:
+                neigh_bus = 0.0
+            parts.append(local_bus)
+            parts.append(neigh_bus * self.neighbor_obs_weight)
+
+        return np.asarray(parts, dtype=np.float32)
 
     def _collect_tls_metrics(self, tls_id):
         waiting_cars, avg_speed = self.runner.get_tls_state(tls_id)
@@ -253,6 +311,33 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         upstream_occupancy = [traci.lane.getLastStepOccupancy(ln) for ln in lanes_in]
         avg_upstream = sum(upstream_occupancy) / len(upstream_occupancy) if upstream_occupancy else 0.0
         return float(waiting_cars), float(avg_speed), float(avg_upstream)
+
+    def _collect_tls_pedestrian_count(self, tls_id: str) -> int:
+        """Число пешеходов на полосах, которыми управляет данный TLS (в т.ч. переходы)."""
+        lanes = set(traci.trafficlight.getControlledLanes(tls_id))
+        persons: set[str] = set()
+        for lane_id in lanes:
+            persons.update(traci.lane.getLastStepPersonIDs(lane_id))
+        return len(persons)
+
+    def _collect_tls_halting_bus_count(self, tls_id: str) -> int:
+        """Остановившиеся автобусы (vclass bus) на въездных полосах перекрёстка."""
+        lanes = set(traci.trafficlight.getControlledLanes(tls_id))
+        halt_speed_eps = 0.1
+        n = 0
+        for lane_id in lanes:
+            for vid in traci.lane.getLastStepVehicleIDs(lane_id):
+                try:
+                    if traci.vehicle.getVehicleClass(vid) != "bus":
+                        continue
+                except traci.TraCIException:
+                    continue
+                try:
+                    if traci.vehicle.getSpeed(vid) < halt_speed_eps:
+                        n += 1
+                except traci.TraCIException:
+                    continue
+        return n
 
     def _build_neighbor_map(self):
         lane_to_tls = {}

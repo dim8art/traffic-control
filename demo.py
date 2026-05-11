@@ -13,23 +13,34 @@ from src.rl.obs_salience import (
     format_top_saliency,
     log_saliency_tensorboard_scalar_groups,
     mean_abs_saliency_across_tls,
+    observation_feature_labels,
     observation_saliency_logp_gradient,
 )
-from src.simulation.env import MultiAgentTrafficEnv, traffic_env_config
+from src.simulation.env import (
+    MultiAgentTrafficEnv,
+    traffic_env_config,
+    traffic_observation_dim,
+)
 
 logger = logging.getLogger(__name__)
 
 
-OBS_DIM_DOC = ", ".join(
-    (
-        "local_waiting",
-        "local_speed",
-        "local_upstream_occ",
-        "neighbor_waiting×w",
-        "neighbor_speed×w",
-        "neighbor_upstream×w",
+def _obs_dim_doc(
+    *,
+    enable_pedestrians: bool,
+    enable_public_transport: bool,
+) -> str:
+    dim = traffic_observation_dim(
+        enable_pedestrians=enable_pedestrians,
+        enable_public_transport=enable_public_transport,
     )
-)
+    return ", ".join(
+        observation_feature_labels(
+            dim,
+            enable_pedestrians=enable_pedestrians,
+            enable_public_transport=enable_public_transport,
+        )
+    )
 
 
 def run_sumo_freerun(
@@ -160,7 +171,10 @@ def run_inference(
             "Saliency (лог консоли): градиент |∂ log π(a|obs)/∂ obs| каждые %s шаг(ов); "
             "порядок компонент: %s",
             explain_obs_every,
-            OBS_DIM_DOC,
+            _obs_dim_doc(
+                enable_pedestrians=enable_pedestrians,
+                enable_public_transport=enable_public_transport,
+            ),
         )
 
     rl_iteration = 0
@@ -204,7 +218,12 @@ def run_inference(
                                 rl_iteration,
                                 tls_id,
                                 action_int,
-                                format_top_saliency(g, top_k=6),
+                                format_top_saliency(
+                                    g,
+                                    top_k=6,
+                                    enable_pedestrians=enable_pedestrians,
+                                    enable_public_transport=enable_public_transport,
+                                ),
                             )
                     except Exception as exc:
                         logger.warning(
@@ -220,6 +239,8 @@ def run_inference(
                         rl_iteration,
                         aggregated,
                         prefix="demo_saliency",
+                        enable_pedestrians=enable_pedestrians,
+                        enable_public_transport=enable_public_transport,
                     )
 
             # Шаг среды

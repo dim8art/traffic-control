@@ -3,7 +3,7 @@ from subprocess import CalledProcessError, CompletedProcess
 
 os.environ.setdefault("SUMO_HOME", "/tmp")
 
-from src.simulation.env import traffic_env_config
+from src.simulation.env import traffic_env_config, traffic_observation_dim
 from src.simulation.runner import SumoRunner
 
 
@@ -59,6 +59,8 @@ def test_generate_random_traffic_success_invokes_random_trips(tmp_path, monkeypa
     assert "-e" in cmd
     idx_e = cmd.index("-e")
     assert cmd[idx_e + 1] == "3600"
+    idx_pf = cmd.index("--prefix")
+    assert cmd[idx_pf + 1] == "veh"
 
 
 def test_create_config_writes_sumocfg(tmp_path):
@@ -74,6 +76,16 @@ def test_create_config_writes_sumocfg(tmp_path):
     assert "<configuration>" in content
     assert str(net_file.name) not in content  # stored as copied worker-local net file
     assert '<end value="3600"/>' in content
+    assert "ignore-route-errors" in content
+
+
+def test_traffic_observation_dim_matches_env_flags() -> None:
+    assert traffic_observation_dim() == 6
+    assert traffic_observation_dim(enable_pedestrians=True) == 8
+    assert traffic_observation_dim(enable_public_transport=True) == 8
+    assert traffic_observation_dim(
+        enable_pedestrians=True, enable_public_transport=True
+    ) == 10
 
 
 def test_traffic_env_config_omits_none_periods():
@@ -111,5 +123,10 @@ def test_generate_random_traffic_with_pedestrians_calls_random_trips_twice(
     )
 
     assert len(captured) == 2
-    assert any("--pedestrians" in cmd for cmd in captured)
+    assert "--validate" in captured[0]
+    assert captured[0][captured[0].index("--prefix") + 1] == "veh"
+    assert "--validate" not in captured[1]
+    assert "--pedestrians" in captured[1]
+    assert captured[1][captured[1].index("--prefix") + 1] == "ped"
+    assert "-t" not in captured[1]
     assert runner._include_pedestrians is True

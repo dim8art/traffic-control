@@ -22,6 +22,20 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _resolve_sumo_binary(gui: bool) -> str:
+    """sumo / sumo-gui из PATH или $SUMO_HOME/bin/."""
+    name = "sumo-gui" if gui else "sumo"
+    found = shutil.which(name)
+    if found:
+        return found
+    home = os.environ.get("SUMO_HOME")
+    if home:
+        candidate = os.path.join(home, "bin", name)
+        if os.path.isfile(candidate):
+            return candidate
+    return name
+
+
 class SumoRunner:
     def __init__(
         self,
@@ -56,6 +70,7 @@ class SumoRunner:
         *,
         vclass: str | None = "passenger",
         pedestrians: bool = False,
+        trip_prefix: str = "",
     ) -> list[str]:
         random_trips = os.path.join(os.environ["SUMO_HOME"], "tools", "randomTrips.py")
         cmd: list[str] = [
@@ -71,18 +86,29 @@ class SumoRunner:
             out_routes,
             "--route-file",
             out_routes,
-            "--validate",
             "--fringe-factor",
             "10",
             "--remove-loops",
             "--random",
-            "-t",
-            'departLane="best" departSpeed="0" departPos="base"',
         ]
+        if trip_prefix:
+            cmd.extend(["--prefix", trip_prefix])
         if pedestrians:
             cmd.append("--pedestrians")
+            # Не использовать -t с departLane/departSpeed (это для ТС): у <person> таких
+            # атрибутов нет → ошибка схемы XML в SUMO.
+            # Без --validate: иначе randomTrips вызывает второй duarouter (--write-trips → .tmp)
+            # и делает os.rename(.tmp, tripfile). Если сеть без нормальных пешеходных маршрутов,
+            # .tmp не появляется → FileNotFoundError. Первый вызов duarouter уже пишет routefile.
         else:
             cmd.extend(["--vclass", vclass or "passenger"])
+            cmd.extend(
+                [
+                    "-t",
+                    'departLane="best" departSpeed="0" departPos="base"',
+                ]
+            )
+            cmd.append("--validate")
         return cmd
 
     def _run_random_trips(
@@ -114,7 +140,9 @@ class SumoRunner:
     ):
         """
         Генерация маршрутов для легкового трафика; опционально пешеходы (--pedestrians)
-        и наземный ОТ (класс vclass=bus). Сеть должна содержать подходящие рёбра
+        и наземный ОТ (класс vclass=bus). У потоков разные --prefix (veh/ped/bus), иначе
+        при нескольких .rou.xml в одном sumocfg совпадают id («vehicle 0 already exists»).
+        Сеть должна содержать подходящие рёбра
         (тротуары для людей); иначе randomTrips может завершиться с ошибкой —
         тогда соответствующий файл будет пустым и не подключается к sumocfg.
         """
@@ -123,7 +151,12 @@ class SumoRunner:
         self._include_public_transport = False
 
         veh_cmd = self._build_random_trips_cmd(
-            self.rou_file, period, duration, pedestrians=False, vclass="passenger"
+            self.rou_file,
+            period,
+            duration,
+            pedestrians=False,
+            vclass="passenger",
+            trip_prefix="veh",
         )
         if not self._run_random_trips(veh_cmd, label="легковой трафик", empty_fallback_path=self.rou_file):
             logger.info("Маршруты легкового транспорта: пустой файл (fallback)")
@@ -139,6 +172,7 @@ class SumoRunner:
                 p_period,
                 duration,
                 pedestrians=True,
+                trip_prefix="ped",
             )
             if self._run_random_trips(
                 ped_cmd, label="пешеходы", empty_fallback_path=self.ped_rou_file
@@ -157,6 +191,7 @@ class SumoRunner:
                 duration,
                 pedestrians=False,
                 vclass="bus",
+                trip_prefix="bus",
             )
             if self._run_random_trips(
                 pt_cmd, label="общественный транспорт (bus)", empty_fallback_path=self.pt_rou_file
@@ -187,24 +222,83 @@ class SumoRunner:
                 <time-to-teleport value="300"/>
                 <max-num-vehicles value="2000"/>
                 <no-warnings value="true"/>
+                <!-- Пешеходы на «грязных» OSM-сетях: иначе assert в MSPModel_Striping без ignore-route-errors -->
+                <ignore-route-errors value="true"/>
             </processing>
         </configuration>
         """
         with open(self.cfg_file, "w") as f:
             f.write(config_content)
 
+    def _maybe_preflight(self) -> None:
+        """Отключение: TRAFFIC_SUMO_PREFLIGHT=0 (ускорение при многократных reset)."""
+        raw = os.environ.get("TRAFFIC_SUMO_PREFLIGHT", "1")
+        val = (raw or "1").strip().lower()
+        if val in ("0", "false", "no"):
+            logger.debug("Пропуск проверки загрузки SUMO (TRAFFIC_SUMO_PREFLIGHT)")
+            return
+        self._preflight_load()
+
+    def _preflight_load(self) -> None:
+        """
+        Быстрая загрузка без GUI: если сеть/маршруты битые, TraCI даёт лишь
+        FatalTraCIError «Connection closed by SUMO». Headless sumo возвращает stderr.
+        """
+        sumo_bin = _resolve_sumo_binary(gui=False)
+        cmd = [
+            sumo_bin,
+            "-c",
+            self.cfg_file,
+            "-e",
+            "1",
+            "--no-step-log",
+            "--no-warnings",
+            "true",
+            "--quit-on-end",
+            "true",
+        ]
+        try:
+            r = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=300,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                "SUMO: таймаут при проверке конфигурации (>300 с). "
+                "Очень большая сеть или зависание при загрузке."
+            ) from e
+        if r.returncode != 0:
+            err = (r.stderr or r.stdout or "").strip()
+            out = (
+                "SUMO не загрузил sim.sumocfg (код %s). "
+                "Типичные причины: ошибка в .rou.xml, нет рёбер для маршрута, "
+                "пешеходы/автобусы при сети без тротуаров или полос bus.\n%s"
+                % (r.returncode, err or "(пустой stderr)")
+            )
+            logger.error(out)
+            raise RuntimeError(out)
+
     def start(self, gui=False):
         """Метод для вызова из env.reset()"""
-        sumo_binary = "sumo-gui" if gui else "sumo"
+        self._maybe_preflight()
+        sumo_binary = _resolve_sumo_binary(gui=gui)
 
         cmd = [
-            sumo_binary, 
-            "-c", self.cfg_file,
-            "--no-warnings", "true",
-            "--quit-on-end", "true",
-            "--start", "true" 
+            sumo_binary,
+            "-c",
+            self.cfg_file,
+            "--ignore-route-errors",
+            "--no-warnings",
+            "true",
+            "--quit-on-end",
+            "true",
+            "--start",
+            "true",
         ]
-        
+
         traci.start(cmd, port=self.port, label=self.unique_id, numRetries=10)
 
     def get_tls_state(self, tls_id):
@@ -223,7 +317,8 @@ class SumoRunner:
         """
         Run simulation with traffic monitoring
         """
-        sumo_binary = "sumo-gui" if gui else "sumo"
+        self._maybe_preflight()
+        sumo_binary = _resolve_sumo_binary(gui=gui)
         traci.start([sumo_binary, "-c", self.cfg_file])
         
         tls_ids = traci.trafficlight.getIDList()

@@ -20,9 +20,22 @@ def test_observation_feature_labels_six_known_names() -> None:
 
 
 def test_observation_feature_labels_extended() -> None:
-    """Лишние измерения получают технические имена f{i}."""
+    """Лишние измерения без флагов получают технические имена f{i}."""
     names = observation_feature_labels(8)
     assert names[6] == "f6"
+
+
+def test_observation_feature_labels_with_ped_and_pt() -> None:
+    names = observation_feature_labels(
+        10,
+        enable_pedestrians=True,
+        enable_public_transport=True,
+    )
+    assert len(names) == 10
+    assert names[6] == "local_ped_count"
+    assert names[7] == "neighbor_ped_count_w"
+    assert names[8] == "local_halting_buses"
+    assert names[9] == "neighbor_halting_buses_w"
 
 
 def test_mean_abs_saliency_across_tls() -> None:
