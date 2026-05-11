@@ -25,6 +25,14 @@ def test_traffic_callbacks_accumulate_waiting_and_speed() -> None:
         info={
             "system_mean_waiting_time": 4.0,
             "system_avg_speed": 8.0,
+            "trip_completed_tt_sum_all": 0.0,
+            "trip_completed_count_all": 0,
+            "trip_completed_tt_sum_ped": 0.0,
+            "trip_completed_count_ped": 0,
+            "trip_completed_tt_sum_car": 0.0,
+            "trip_completed_count_car": 0,
+            "trip_completed_tt_sum_pt": 0.0,
+            "trip_completed_count_pt": 0,
         }
     )
 
@@ -62,3 +70,29 @@ def test_traffic_callbacks_accumulate_waiting_and_speed() -> None:
 
     assert ep.custom_metrics["system_mean_waiting_time"] == 4.0
     assert ep.custom_metrics["system_avg_speed"] == 8.0
+
+
+def test_traffic_callbacks_completed_trip_time_means() -> None:
+    """Суммы/счётчики завершённых поездок из __common__ дают среднее время в пути по группам."""
+    cb = TrafficCallbacks()
+    ep = _EpisodeStub(
+        info={
+            "system_mean_waiting_time": 0.0,
+            "system_avg_speed": 0.0,
+            "trip_completed_tt_sum_all": 100.0,
+            "trip_completed_count_all": 4,
+            "trip_completed_tt_sum_ped": 30.0,
+            "trip_completed_count_ped": 2,
+            "trip_completed_tt_sum_car": 50.0,
+            "trip_completed_count_car": 1,
+            "trip_completed_tt_sum_pt": 20.0,
+            "trip_completed_count_pt": 1,
+        }
+    )
+    dummy = MagicMock()
+    cb.on_episode_step(worker=dummy, base_env=dummy, policies={}, episode=ep, env_index=0)
+    cb.on_episode_end(worker=dummy, base_env=dummy, policies={}, episode=ep, env_index=0)
+    assert ep.custom_metrics["mean_completed_trip_time_all_s"] == 25.0
+    assert ep.custom_metrics["mean_completed_trip_time_pedestrian_s"] == 15.0
+    assert ep.custom_metrics["mean_completed_trip_time_car_s"] == 50.0
+    assert ep.custom_metrics["mean_completed_trip_time_public_transport_s"] == 20.0

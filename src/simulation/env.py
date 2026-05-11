@@ -64,6 +64,14 @@ def traffic_env_config(
     return cfg
 
 
+_TRIP_SUM_KEYS = (
+    ("trip_completed_tt_sum_all", "trip_completed_count_all", "ep_tt_sum_all", "ep_tt_cnt_all"),
+    ("trip_completed_tt_sum_ped", "trip_completed_count_ped", "ep_tt_sum_ped", "ep_tt_cnt_ped"),
+    ("trip_completed_tt_sum_car", "trip_completed_count_car", "ep_tt_sum_car", "ep_tt_cnt_car"),
+    ("trip_completed_tt_sum_pt", "trip_completed_count_pt", "ep_tt_sum_pt", "ep_tt_cnt_pt"),
+)
+
+
 class TrafficCallbacks(DefaultCallbacks):
     def on_episode_step(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         last_info = episode.last_info_for("__common__")
@@ -81,6 +89,13 @@ class TrafficCallbacks(DefaultCallbacks):
                     episode.user_data["avg_speeds"] = []
                 episode.user_data["avg_speeds"].append(avg_speed)
 
+            for sum_k, cnt_k, acc_s, acc_c in _TRIP_SUM_KEYS:
+                ds = last_info.get(sum_k)
+                dc = last_info.get(cnt_k)
+                if ds is not None and dc is not None:
+                    episode.user_data[acc_s] = float(episode.user_data.get(acc_s, 0.0)) + float(ds)
+                    episode.user_data[acc_c] = int(episode.user_data.get(acc_c, 0)) + int(dc)
+
     def on_episode_end(self, *, worker, base_env, policies, episode, env_index, **kwargs):
         if "waiting_times" in episode.user_data and episode.user_data["waiting_times"]:
             mean_wait = np.mean(episode.user_data["waiting_times"])
@@ -88,6 +103,27 @@ class TrafficCallbacks(DefaultCallbacks):
         
         if "avg_speeds" in episode.user_data and episode.user_data["avg_speeds"]:
             episode.custom_metrics["system_avg_speed"] = np.mean(episode.user_data["avg_speeds"])
+
+        if int(episode.user_data.get("ep_tt_cnt_all", 0)) > 0:
+            episode.custom_metrics["mean_completed_trip_time_all_s"] = (
+                float(episode.user_data["ep_tt_sum_all"])
+                / int(episode.user_data["ep_tt_cnt_all"])
+            )
+        if int(episode.user_data.get("ep_tt_cnt_ped", 0)) > 0:
+            episode.custom_metrics["mean_completed_trip_time_pedestrian_s"] = (
+                float(episode.user_data["ep_tt_sum_ped"])
+                / int(episode.user_data["ep_tt_cnt_ped"])
+            )
+        if int(episode.user_data.get("ep_tt_cnt_car", 0)) > 0:
+            episode.custom_metrics["mean_completed_trip_time_car_s"] = (
+                float(episode.user_data["ep_tt_sum_car"])
+                / int(episode.user_data["ep_tt_cnt_car"])
+            )
+        if int(episode.user_data.get("ep_tt_cnt_pt", 0)) > 0:
+            episode.custom_metrics["mean_completed_trip_time_public_transport_s"] = (
+                float(episode.user_data["ep_tt_sum_pt"])
+                / int(episode.user_data["ep_tt_cnt_pt"])
+            )
 
 class MultiAgentTrafficEnv(MultiAgentEnv):
     def __init__(self, config):
@@ -137,6 +173,8 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.idle_steps = {}
         self.total_forced_switches = 0
         self.gui_enabled = config.get("gui", False)
+        self._veh_depart_times: dict[str, float] = {}
+        self._ped_depart_times: dict[str, float] = {}
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
@@ -158,13 +196,19 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.runner.start(gui=self.gui_enabled)
         traci.switch(self.runner.unique_id)
 
+        self._veh_depart_times = {}
+        self._ped_depart_times = {}
+
         if not self._agent_ids:
             self._agent_ids = list(traci.trafficlight.getIDList())
 
-        for _ in range(500): 
+        for _ in range(500):
             traci.simulationStep()
+            self._travel_after_sim_step(count_completed=False)
             if traci.simulation.getMinExpectedNumber() > 0:
                 break
+
+        self._travel_align_episode_baseline()
 
         self._agent_ids = list(traci.trafficlight.getIDList())
         self.neighbor_map = self._build_neighbor_map()
@@ -206,8 +250,10 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
                 if tls_id not in effective_actions:
                     effective_actions[tls_id] = int(action == 1)
 
+        trip_batch = self._empty_trip_batch()
         for _ in range(15):
             traci.simulationStep()
+            self._merge_trip_batch(trip_batch, self._travel_after_sim_step(count_completed=True))
 
         self.total_forced_switches += forced_switches_step
         system_stats = self.get_system_metrics()
@@ -231,6 +277,14 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
                 "system_mean_waiting_time": system_stats["mean_waiting_time"],
                 "forced_switches_step": forced_switches_step,
                 "forced_switches_total": self.total_forced_switches,
+                "trip_completed_tt_sum_all": trip_batch["sum_all"],
+                "trip_completed_count_all": trip_batch["cnt_all"],
+                "trip_completed_tt_sum_ped": trip_batch["sum_ped"],
+                "trip_completed_count_ped": trip_batch["cnt_ped"],
+                "trip_completed_tt_sum_car": trip_batch["sum_car"],
+                "trip_completed_count_car": trip_batch["cnt_car"],
+                "trip_completed_tt_sum_pt": trip_batch["sum_pt"],
+                "trip_completed_count_pt": trip_batch["cnt_pt"],
             }
         }
         
@@ -395,6 +449,84 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
 
         halt_out = sum([traci.lane.getLastStepHaltingNumber(l) for l in out_lanes])
         return float(halt_in + halt_out * self.outgoing_halt_weight)
+
+    @staticmethod
+    def _empty_trip_batch() -> dict[str, float | int]:
+        return {
+            "sum_all": 0.0,
+            "cnt_all": 0,
+            "sum_ped": 0.0,
+            "cnt_ped": 0,
+            "sum_car": 0.0,
+            "cnt_car": 0,
+            "sum_pt": 0.0,
+            "cnt_pt": 0,
+        }
+
+    @staticmethod
+    def _merge_trip_batch(dst: dict[str, float | int], src: dict[str, float | int]) -> None:
+        for k in src:
+            dst[k] = dst[k] + src[k]  # type: ignore[operator]
+
+    def _travel_align_episode_baseline(self) -> None:
+        """После прогрева: время в пути считаем от текущего момента для уже в сети агентов."""
+        now = float(traci.simulation.getTime())
+        for vid in traci.vehicle.getIDList():
+            self._veh_depart_times[vid] = now
+        for pid in traci.person.getIDList():
+            self._ped_depart_times[pid] = now
+
+    def _travel_after_sim_step(self, count_completed: bool) -> dict[str, float | int]:
+        """
+        После одного simulationStep: регистрация въездов; при count_completed — учёт завершённых поездок.
+        Длительность = время прибытия − время появления в сети (или getDeparture для ТС).
+        """
+        batch = self._empty_trip_batch()
+        now = float(traci.simulation.getTime())
+
+        for vid in traci.simulation.getDepartedIDList():
+            self._veh_depart_times[vid] = now
+
+        for pid in traci.simulation.getDepartedPersonIDList():
+            self._ped_depart_times[pid] = now
+
+        if not count_completed:
+            return batch
+
+        for pid in traci.simulation.getArrivedPersonIDList():
+            dep = self._ped_depart_times.pop(pid, None)
+            if dep is None:
+                continue
+            tt = max(0.0, now - float(dep))
+            batch["sum_ped"] += tt
+            batch["cnt_ped"] += 1
+            batch["sum_all"] += tt
+            batch["cnt_all"] += 1
+
+        for vid in traci.simulation.getArrivedIDList():
+            dep_map = self._veh_depart_times.pop(vid, None)
+            try:
+                dep_sched = float(traci.vehicle.getDeparture(vid))
+            except traci.TraCIException:
+                dep_sched = None
+            dep = dep_map if dep_map is not None else dep_sched
+            if dep is None:
+                continue
+            tt = max(0.0, now - float(dep))
+            try:
+                vclass = traci.vehicle.getVehicleClass(vid)
+            except traci.TraCIException:
+                vclass = "passenger"
+            if vclass == "bus":
+                batch["sum_pt"] += tt
+                batch["cnt_pt"] += 1
+            else:
+                batch["sum_car"] += tt
+                batch["cnt_car"] += 1
+            batch["sum_all"] += tt
+            batch["cnt_all"] += 1
+
+        return batch
 
     def get_system_metrics(self):
         """
