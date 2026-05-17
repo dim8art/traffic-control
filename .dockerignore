@@ -1,0 +1,21 @@
+.git
+.gitignore
+.venv
+venv
+__pycache__
+*.py[cod]
+.env
+.cursor
+.cursorignore
+ray_results
+checkpoints
+default_setup
+*.out.xml
+*.log
+.ipynb_checkpoints
+.vscode
+.idea
+.DS_Store
+
+# Крупные карты и артефакты — монтируйте через volume
+data/

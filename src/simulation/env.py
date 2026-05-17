@@ -6,6 +6,81 @@ import traci
 from ray.rllib.algorithms.callbacks import DefaultCallbacks
 from src.simulation.runner import SumoRunner
 
+# Режимы награды (см. traffic_env_config / MultiAgentTrafficEnv.reward_mode).
+REWARD_MODES: tuple[str, ...] = (
+    "pressure",
+    "inbound_queue",
+    "lane_delay",
+    "pressure_sidewalk",
+    "inbound_queue_sidewalk",
+    "lane_delay_sidewalk",
+)
+
+_LANE_VEHICLE_VCLASSES = frozenset(
+    {
+        "passenger",
+        "private",
+        "bus",
+        "delivery",
+        "motorcycle",
+        "evehicle",
+        "hov",
+        "taxi",
+        "truck",
+        "trailer",
+        "tram",
+        "rail",
+        "rail_electric",
+        "ship",
+        "emergency",
+        "authority",
+        "army",
+        "vip",
+        "custom1",
+        "custom2",
+    },
+)
+
+
+def _person_ids_on_lane_full_scan(lane_id: str) -> list[str]:
+    """Пешеходы на полосе при отсутствии lane/edge lastStep person list в TraCI."""
+    out: list[str] = []
+    try:
+        for pid in traci.person.getIDList():
+            try:
+                if traci.person.getLaneID(pid) == lane_id:
+                    out.append(pid)
+            except traci.TraCIException:
+                continue
+    except traci.TraCIException:
+        pass
+    return out
+
+
+def _lane_last_step_person_ids(lane_id: str) -> list[str]:
+    lane_fn = getattr(traci.lane, "getLastStepPersonIDs", None)
+    if lane_fn is not None:
+        try:
+            return list(lane_fn(lane_id))
+        except traci.TraCIException:
+            pass
+    edge_fn = getattr(traci.edge, "getLastStepPersonIDs", None)
+    if edge_fn is not None:
+        try:
+            eid = traci.lane.getEdgeID(lane_id)
+            candidates = edge_fn(eid)
+        except traci.TraCIException:
+            return _person_ids_on_lane_full_scan(lane_id)
+        out: list[str] = []
+        for pid in candidates:
+            try:
+                if traci.person.getLaneID(pid) == lane_id:
+                    out.append(pid)
+            except traci.TraCIException:
+                continue
+        return out
+    return _person_ids_on_lane_full_scan(lane_id)
+
 
 def traffic_observation_dim(
     *,
@@ -44,11 +119,16 @@ def traffic_env_config(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
 ) -> dict:
     """
     Единый словарь для MultiAgentTrafficEnv (Ray / демо / benchmark).
-    Периоды пешеходов и ОТ по умолчанию задаются в SumoRunner, если None.
+    reward_mode: pressure | inbound_queue | lane_delay | *_sidewalk (см. REWARD_MODES).
     """
+    rm = str(reward_mode or "pressure").strip().lower()
+    if rm not in REWARD_MODES:
+        raise ValueError(f"reward_mode must be one of {list(REWARD_MODES)}, got {reward_mode!r}")
     cfg: dict = {
         "net_file": net_file,
         "traffic_period": traffic_period,
@@ -56,11 +136,14 @@ def traffic_env_config(
         "gui": gui,
         "enable_pedestrians": enable_pedestrians,
         "enable_public_transport": enable_public_transport,
+        "reward_mode": rm,
     }
     if pedestrian_period is not None:
         cfg["pedestrian_period"] = float(pedestrian_period)
     if public_transport_period is not None:
         cfg["public_transport_period"] = float(public_transport_period)
+    if ped_reward_weight is not None:
+        cfg["ped_reward_weight"] = float(ped_reward_weight)
     return cfg
 
 
@@ -155,6 +238,14 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.pedestrian_period = config.get("pedestrian_period")
         self.public_transport_period = config.get("public_transport_period")
 
+        reward_mode = str(config.get("reward_mode", "pressure")).strip().lower()
+        if reward_mode not in REWARD_MODES:
+            raise ValueError(
+                f"reward_mode must be one of {list(REWARD_MODES)}, got {config.get('reward_mode')!r}",
+            )
+        self.reward_mode = reward_mode
+        self.ped_reward_weight = float(config.get("ped_reward_weight", 1.0))
+
         obs_dim = traffic_observation_dim(
             enable_pedestrians=self.enable_pedestrians,
             enable_public_transport=self.enable_public_transport,
@@ -174,7 +265,11 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.total_forced_switches = 0
         self.gui_enabled = config.get("gui", False)
         self._veh_depart_times: dict[str, float] = {}
+        self._veh_vclass: dict[str, str] = {}
         self._ped_depart_times: dict[str, float] = {}
+        # SUMO < ~1.18: edge VAR_BIDI unsupported → skip getBidiEdge after first TraCI error (avoids log spam).
+        self._edge_get_bidi_supported: bool | None = None
+        self._sidewalk_lanes_by_tls: dict[str, frozenset[str]] | None = None
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
@@ -197,7 +292,9 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         traci.switch(self.runner.unique_id)
 
         self._veh_depart_times = {}
+        self._veh_vclass = {}
         self._ped_depart_times = {}
+        self._edge_get_bidi_supported = None
 
         if not self._agent_ids:
             self._agent_ids = list(traci.trafficlight.getIDList())
@@ -212,7 +309,8 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
 
         self._agent_ids = list(traci.trafficlight.getIDList())
         self.neighbor_map = self._build_neighbor_map()
-        
+        self._sidewalk_lanes_by_tls = self._build_sidewalk_lanes_by_tls()
+
         observations = {a_id: self._get_local_obs(a_id) for a_id in self._agent_ids}
         self.last_actions = {a_id: 0 for a_id in self._agent_ids}
         self.idle_steps = {a_id: 0 for a_id in self._agent_ids}
@@ -371,7 +469,7 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         lanes = set(traci.trafficlight.getControlledLanes(tls_id))
         persons: set[str] = set()
         for lane_id in lanes:
-            persons.update(traci.lane.getLastStepPersonIDs(lane_id))
+            persons.update(_lane_last_step_person_ids(lane_id))
         return len(persons)
 
     def _collect_tls_halting_bus_count(self, tls_id: str) -> int:
@@ -415,22 +513,143 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
 
         return {k: sorted(v) for k, v in neighbor_map.items()}
 
-    def _get_local_reward(self, tls_id, action):
-        local_pressure = self._get_tls_pressure(tls_id)
+    def _build_sidewalk_lanes_by_tls(self) -> dict[str, frozenset[str]]:
+        out: dict[str, frozenset[str]] = {}
+        for tls_id in self._agent_ids:
+            edges = self._approach_edges_for_tls(tls_id)
+            lanes = self._collect_sidewalk_lanes_on_edges(edges)
+            out[tls_id] = frozenset(lanes)
+        return out
 
+    def _approach_edges_for_tls(self, tls_id: str) -> set[str]:
+        edges: set[str] = set()
+        for ln in traci.trafficlight.getControlledLanes(tls_id):
+            try:
+                edges.add(traci.lane.getEdgeID(ln))
+            except traci.TraCIException:
+                continue
+        extra: set[str] = set()
+        if self._edge_get_bidi_supported is False:
+            return edges
+        get_bidi = getattr(traci.edge, "getBidiEdge", None)
+        if get_bidi is None:
+            self._edge_get_bidi_supported = False
+            return edges
+        for eid in edges:
+            if self._edge_get_bidi_supported is False:
+                break
+            try:
+                b = get_bidi(eid)
+            except traci.TraCIException:
+                self._edge_get_bidi_supported = False
+                break
+            if self._edge_get_bidi_supported is None:
+                self._edge_get_bidi_supported = True
+            if isinstance(b, str) and b:
+                extra.add(b)
+        return edges | extra
+
+    def _collect_sidewalk_lanes_on_edges(self, edge_ids: set[str]) -> set[str]:
+        lanes: set[str] = set()
+        for eid in edge_ids:
+            try:
+                n = traci.edge.getLaneNumber(eid)
+            except traci.TraCIException:
+                continue
+            for i in range(n):
+                lid = f"{eid}_{i}"
+                try:
+                    if self._lane_is_sidewalk_for_pedestrians(lid):
+                        lanes.add(lid)
+                except traci.TraCIException:
+                    continue
+        return lanes
+
+    @staticmethod
+    def _lane_allowed_vclasses(lane_id: str) -> set[str]:
+        raw = traci.lane.getAllowed(lane_id)
+        if raw is None:
+            return set()
+        if isinstance(raw, str):
+            return set(raw.split()) if raw.strip() else set()
+        if isinstance(raw, (tuple, list, set, frozenset)):
+            return {str(x) for x in raw if str(x).strip()}
+        s = str(raw).strip()
+        return {s} if s else set()
+
+    @staticmethod
+    def _lane_is_sidewalk_for_pedestrians(lane_id: str) -> bool:
+        parts = MultiAgentTrafficEnv._lane_allowed_vclasses(lane_id)
+        if not parts or "pedestrian" not in parts:
+            return False
+        if parts & _LANE_VEHICLE_VCLASSES:
+            return False
+        return True
+
+    def _sidewalk_lane_ids(self, tls_id: str) -> frozenset[str]:
+        if self._sidewalk_lanes_by_tls is None:
+            return frozenset()
+        return self._sidewalk_lanes_by_tls.get(tls_id, frozenset())
+
+    def _get_tls_sidewalk_ped_halting_count(self, tls_id: str) -> float:
+        eps = 0.1
+        n = 0
+        for lid in self._sidewalk_lane_ids(tls_id):
+            for pid in _lane_last_step_person_ids(lid):
+                try:
+                    if traci.person.getSpeed(pid) < eps:
+                        n += 1
+                except traci.TraCIException:
+                    continue
+        return float(n)
+
+    def _get_tls_sidewalk_ped_waiting_sum(self, tls_id: str) -> float:
+        s = 0.0
+        for lid in self._sidewalk_lane_ids(tls_id):
+            for pid in _lane_last_step_person_ids(lid):
+                try:
+                    s += float(traci.person.getWaitingTime(pid))
+                except traci.TraCIException:
+                    continue
+        return float(s)
+
+    def _get_tls_inbound_queue(self, tls_id: str) -> float:
+        lanes_in = set(traci.trafficlight.getControlledLanes(tls_id))
+        return float(sum(traci.lane.getLastStepHaltingNumber(ln) for ln in lanes_in))
+
+    def _get_tls_inbound_lane_delay(self, tls_id: str) -> float:
+        lanes_in = set(traci.trafficlight.getControlledLanes(tls_id))
+        return float(sum(traci.lane.getWaitingTime(ln) for ln in lanes_in))
+
+    def _get_tls_reward_signal(self, tls_id: str) -> float:
+        w = self.ped_reward_weight
+        if self.reward_mode == "pressure":
+            return self._get_tls_pressure(tls_id)
+        if self.reward_mode == "inbound_queue":
+            return self._get_tls_inbound_queue(tls_id)
+        if self.reward_mode == "lane_delay":
+            return self._get_tls_inbound_lane_delay(tls_id)
+        if self.reward_mode == "pressure_sidewalk":
+            return self._get_tls_pressure(tls_id) + w * self._get_tls_sidewalk_ped_halting_count(tls_id)
+        if self.reward_mode == "inbound_queue_sidewalk":
+            return self._get_tls_inbound_queue(tls_id) + w * self._get_tls_sidewalk_ped_halting_count(tls_id)
+        if self.reward_mode == "lane_delay_sidewalk":
+            return self._get_tls_inbound_lane_delay(tls_id) + w * self._get_tls_sidewalk_ped_waiting_sum(tls_id)
+        raise RuntimeError(f"unexpected reward_mode: {self.reward_mode!r}")
+
+    def _get_local_reward(self, tls_id, action):
+        local_signal = self._get_tls_reward_signal(tls_id)
         neighbors = self.neighbor_map.get(tls_id, [])
         if neighbors:
-            neighbor_pressure = float(np.mean([self._get_tls_pressure(n_id) for n_id in neighbors]))
+            neighbor_signal = float(
+                np.mean([self._get_tls_reward_signal(n_id) for n_id in neighbors]),
+            )
         else:
-            neighbor_pressure = 0.0
-
+            neighbor_signal = 0.0
         reward = -(
-            self.local_reward_weight * float(local_pressure)
-            + self.neighbor_reward_weight * float(neighbor_pressure)
+            self.local_reward_weight * float(local_signal)
+            + self.neighbor_reward_weight * float(neighbor_signal)
         )
-
-        # --- Штраф за переключение ---
-        # Если действие action == 1 (смена фазы), вычитаем штраф
         if action is not None and action == 1:
             reward -= self.switch_penalty
         return reward
@@ -473,6 +692,10 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         now = float(traci.simulation.getTime())
         for vid in traci.vehicle.getIDList():
             self._veh_depart_times[vid] = now
+            try:
+                self._veh_vclass[vid] = traci.vehicle.getVehicleClass(vid)
+            except traci.TraCIException:
+                self._veh_vclass[vid] = "passenger"
         for pid in traci.person.getIDList():
             self._ped_depart_times[pid] = now
 
@@ -486,6 +709,10 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
 
         for vid in traci.simulation.getDepartedIDList():
             self._veh_depart_times[vid] = now
+            try:
+                self._veh_vclass[vid] = traci.vehicle.getVehicleClass(vid)
+            except traci.TraCIException:
+                self._veh_vclass[vid] = "passenger"
 
         for pid in traci.simulation.getDepartedPersonIDList():
             self._ped_depart_times[pid] = now
@@ -504,19 +731,13 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
             batch["cnt_all"] += 1
 
         for vid in traci.simulation.getArrivedIDList():
-            dep_map = self._veh_depart_times.pop(vid, None)
-            try:
-                dep_sched = float(traci.vehicle.getDeparture(vid))
-            except traci.TraCIException:
-                dep_sched = None
-            dep = dep_map if dep_map is not None else dep_sched
+            # Прибытие: ТС уже удалено из симуляции — не вызывать traci.vehicle.* по vid
+            # (иначе TraCI: «Vehicle … is not known» и шум в логах кластера).
+            dep = self._veh_depart_times.pop(vid, None)
+            vclass = self._veh_vclass.pop(vid, "passenger")
             if dep is None:
                 continue
             tt = max(0.0, now - float(dep))
-            try:
-                vclass = traci.vehicle.getVehicleClass(vid)
-            except traci.TraCIException:
-                vclass = "passenger"
             if vclass == "bus":
                 batch["sum_pt"] += tt
                 batch["cnt_pt"] += 1

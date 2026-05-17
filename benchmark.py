@@ -11,7 +11,7 @@ import ray
 import traci
 from ray.rllib.algorithms.algorithm import Algorithm
 
-from src.simulation.env import MultiAgentTrafficEnv, traffic_env_config
+from src.simulation.env import REWARD_MODES, MultiAgentTrafficEnv, traffic_env_config
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,8 @@ def get_metrics(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
 ) -> dict[str, float]:
     """Запуск симуляции для конкретного файла сети"""
     env_config = traffic_env_config(
@@ -58,6 +60,8 @@ def get_metrics(
         pedestrian_period=pedestrian_period,
         enable_public_transport=enable_public_transport,
         public_transport_period=public_transport_period,
+        reward_mode=reward_mode,
+        ped_reward_weight=ped_reward_weight,
     )
     env = MultiAgentTrafficEnv(env_config)
     obs, info = env.reset()
@@ -104,6 +108,8 @@ def run_comprehensive_benchmark(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
 ) -> None:
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, logging_level="ERROR")
@@ -145,6 +151,8 @@ def run_comprehensive_benchmark(
             pedestrian_period=pedestrian_period,
             enable_public_transport=enable_public_transport,
             public_transport_period=public_transport_period,
+            reward_mode=reward_mode,
+            ped_reward_weight=ped_reward_weight,
         )
         results[v_info['name']] = res
 
@@ -186,6 +194,20 @@ if __name__ == "__main__":
         default=None,
         metavar="SEC",
     )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды при оценке PPO",
+    )
+    parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk",
+    )
     args = parser.parse_args()
 
     from src.logging_config import configure_logging
@@ -201,4 +223,6 @@ if __name__ == "__main__":
         pedestrian_period=args.pedestrian_period,
         enable_public_transport=args.with_public_transport,
         public_transport_period=args.public_transport_period,
+        reward_mode=args.reward_mode,
+        ped_reward_weight=args.ped_reward_weight,
     )

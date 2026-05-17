@@ -10,6 +10,7 @@ from ray.tune import CheckpointConfig, RunConfig
 from ray.rllib.algorithms.ppo import PPOConfig
 
 from src.simulation.env import (
+    REWARD_MODES,
     MultiAgentTrafficEnv,
     TrafficCallbacks,
     traffic_env_config,
@@ -26,6 +27,11 @@ def run_train(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
+    num_env_runners: int = 6,
+    rollout_fragment_length: int = 50,
+    sample_timeout_s: float = 600.0,
 ) -> None:
     if not os.path.exists(sumo_net_xml_path):
         raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
@@ -38,6 +44,8 @@ def run_train(
         pedestrian_period=pedestrian_period,
         enable_public_transport=enable_public_transport,
         public_transport_period=public_transport_period,
+        reward_mode=reward_mode,
+        ped_reward_weight=ped_reward_weight,
     )
     obs_space = traffic_policy_observation_space(
         enable_pedestrians=enable_pedestrians,
@@ -55,7 +63,9 @@ def run_train(
         )
         .framework("torch")
         .env_runners(
-            num_env_runners=6, rollout_fragment_length=50, sample_timeout_s=120
+            num_env_runners=num_env_runners,
+            rollout_fragment_length=rollout_fragment_length,
+            sample_timeout_s=sample_timeout_s,
         )
         .callbacks(TrafficCallbacks)
         .multi_agent(
@@ -101,16 +111,16 @@ if __name__ == "__main__":
         help="Путь к SUMO-сети (.net.xml), полученной через prepare",
     )
     parser.add_argument(
-        "--period", 
-        type=float, 
-        default=0.5, 
-        help="Traffic generation period (lower = more traffic, e.g. 0.2)"
+        "--period",
+        type=float,
+        default=0.5,
+        help="Traffic generation period (lower = more traffic, e.g. 0.2)",
     )
     parser.add_argument(
-        "--duration", 
-        type=int, 
-        default=3600, 
-        help="Simulation duration in seconds"
+        "--duration",
+        type=int,
+        default=3600,
+        help="Simulation duration in seconds",
     )
     parser.add_argument(
         "--with-pedestrians",
@@ -136,6 +146,41 @@ if __name__ == "__main__":
         metavar="SEC",
         help="Интервал рейсов ОТ (по умолчанию ~3× --period)",
     )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды (в т.ч. *_sidewalk — см. src/simulation/env.py)",
+    )
+    parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk (по умолчанию 1.0)",
+    )
+    parser.add_argument(
+        "--sample-timeout-s",
+        type=float,
+        default=600.0,
+        metavar="SEC",
+        help="Таймаут сбора сэмплов с env-воркеров Ray",
+    )
+    parser.add_argument(
+        "--num-env-runners",
+        type=int,
+        default=6,
+        metavar="N",
+        help="Число параллельных env-воркеров",
+    )
+    parser.add_argument(
+        "--rollout-fragment-length",
+        type=int,
+        default=50,
+        metavar="T",
+        help="Длина фрагмента rollout на воркер",
+    )
 
     args = parser.parse_args()
 
@@ -151,4 +196,9 @@ if __name__ == "__main__":
         pedestrian_period=args.pedestrian_period,
         enable_public_transport=args.with_public_transport,
         public_transport_period=args.public_transport_period,
+        reward_mode=args.reward_mode,
+        ped_reward_weight=args.ped_reward_weight,
+        num_env_runners=args.num_env_runners,
+        rollout_fragment_length=args.rollout_fragment_length,
+        sample_timeout_s=args.sample_timeout_s,
     )

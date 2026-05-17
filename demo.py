@@ -17,6 +17,7 @@ from src.rl.obs_salience import (
     observation_saliency_logp_gradient,
 )
 from src.simulation.env import (
+    REWARD_MODES,
     MultiAgentTrafficEnv,
     traffic_env_config,
     traffic_observation_dim,
@@ -53,6 +54,8 @@ def run_sumo_freerun(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
 ) -> None:
     """
     SUMO со случайным трафиком без RL: фазы светофоров не переключаются (действие 0 на всех TLS).
@@ -69,6 +72,8 @@ def run_sumo_freerun(
             pedestrian_period=pedestrian_period,
             enable_public_transport=enable_public_transport,
             public_transport_period=public_transport_period,
+            reward_mode=reward_mode,
+            ped_reward_weight=ped_reward_weight,
         )
     )
     obs, _info = env.reset()
@@ -108,6 +113,8 @@ def run_inference(
     pedestrian_period: float | None = None,
     enable_public_transport: bool = False,
     public_transport_period: float | None = None,
+    reward_mode: str = "pressure",
+    ped_reward_weight: float | None = None,
     explain_obs_every: int | None = None,
     explain_tls_limit: int = 2,
     tensorboard_dir: str | None = None,
@@ -155,6 +162,8 @@ def run_inference(
         pedestrian_period=pedestrian_period,
         enable_public_transport=enable_public_transport,
         public_transport_period=public_transport_period,
+        reward_mode=reward_mode,
+        ped_reward_weight=ped_reward_weight,
     )
     env = MultiAgentTrafficEnv(env_config)
 
@@ -312,6 +321,20 @@ if __name__ == "__main__":
         metavar="SEC",
         help="Интервал рейсов ОТ (по умолчанию ~3× --period)",
     )
+    parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды среды",
+    )
+    parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk",
+    )
 
     parser.add_argument(
         "--explain-obs-every",
@@ -364,6 +387,8 @@ if __name__ == "__main__":
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
         )
     else:
         if not args.checkpoint:
@@ -378,6 +403,8 @@ if __name__ == "__main__":
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
             explain_obs_every=args.explain_obs_every,
             explain_tls_limit=args.explain_tls_limit,
             tensorboard_dir=args.tensorboard_dir,

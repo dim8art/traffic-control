@@ -6,6 +6,7 @@ import sys
 from benchmark import run_comprehensive_benchmark
 from demo import run_inference, run_sumo_freerun
 from prepare_map import register_prepare_arguments, run_prepare_from_args
+from src.simulation.env import REWARD_MODES
 from train import run_train
 
 
@@ -52,6 +53,41 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="SEC",
         help="Интервал рейсов ОТ (по умолчанию от --period)",
     )
+    train_parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды агента TLS",
+    )
+    train_parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk (по умолчанию 1.0)",
+    )
+    train_parser.add_argument(
+        "--sample-timeout-s",
+        type=float,
+        default=600.0,
+        metavar="SEC",
+        help="Таймаут сбора сэмплов с воркеров",
+    )
+    train_parser.add_argument(
+        "--num-env-runners",
+        type=int,
+        default=6,
+        metavar="N",
+        help="Число параллельных env-воркеров Ray",
+    )
+    train_parser.add_argument(
+        "--rollout-fragment-length",
+        type=int,
+        default=50,
+        metavar="T",
+        help="Длина фрагмента rollout",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="Запуск обученной политики в SUMO")
     demo_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path")
@@ -86,6 +122,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SEC",
         help="Интервал ОТ",
+    )
+    demo_parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды среды (лог суммы награды в демо)",
+    )
+    demo_parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk",
     )
     demo_parser.add_argument(
         "--saliency",
@@ -154,6 +204,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SEC",
     )
+    sumo_parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды среды (для совместимости с MultiAgentTrafficEnv)",
+    )
+    sumo_parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk",
+    )
     sumo_parser.add_argument("--no-gui", action="store_false", dest="gui", help="SUMO без GUI")
     sumo_parser.set_defaults(gui=True)
 
@@ -175,6 +239,20 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=None,
         metavar="SEC",
+    )
+    bench_parser.add_argument(
+        "--reward-mode",
+        type=str,
+        choices=list(REWARD_MODES),
+        default="pressure",
+        help="Функция награды при оценке PPO",
+    )
+    bench_parser.add_argument(
+        "--ped-reward-weight",
+        type=float,
+        default=None,
+        metavar="W",
+        help="Вес пешеходов для *_sidewalk",
     )
 
     subparsers.add_parser("tui", help="Интерактивное меню")
@@ -207,6 +285,11 @@ def main() -> None:
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
+            num_env_runners=args.num_env_runners,
+            rollout_fragment_length=args.rollout_fragment_length,
+            sample_timeout_s=args.sample_timeout_s,
         )
     elif args.command == "demo":
         explain_every = args.explain_obs_every
@@ -222,6 +305,8 @@ def main() -> None:
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
             explain_obs_every=explain_every,
             explain_tls_limit=args.explain_tls_limit,
             tensorboard_dir=args.tensorboard_dir,
@@ -237,6 +322,8 @@ def main() -> None:
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
         )
     elif args.command == "benchmark":
         run_comprehensive_benchmark(
@@ -248,6 +335,8 @@ def main() -> None:
             pedestrian_period=args.pedestrian_period,
             enable_public_transport=args.with_public_transport,
             public_transport_period=args.public_transport_period,
+            reward_mode=args.reward_mode,
+            ped_reward_weight=args.ped_reward_weight,
         )
     elif args.command == "tui":
         from tui import run_tui

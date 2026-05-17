@@ -1,9 +1,17 @@
 import os
 from subprocess import CalledProcessError, CompletedProcess
 
+import pytest
+
 os.environ.setdefault("SUMO_HOME", "/tmp")
 
-from src.simulation.env import traffic_env_config, traffic_observation_dim
+from src.simulation.env import (
+    REWARD_MODES,
+    MultiAgentTrafficEnv,
+    traffic_env_config,
+    traffic_observation_dim,
+    _lane_last_step_person_ids,
+)
 from src.simulation.runner import SumoRunner
 
 
@@ -97,6 +105,114 @@ def test_traffic_env_config_omits_none_periods():
     )
     assert cfg["enable_pedestrians"] is True
     assert "pedestrian_period" not in cfg
+
+
+def test_traffic_env_config_invalid_reward_mode_raises():
+    with pytest.raises(ValueError, match="reward_mode"):
+        traffic_env_config("/tmp/map.net.xml", reward_mode="not_a_mode")
+
+
+def test_traffic_env_config_reward_mode_normalizes_and_ped_weight():
+    cfg = traffic_env_config(
+        "/tmp/map.net.xml",
+        reward_mode="  PRESSURE_SIDEWALK ",
+        ped_reward_weight=0.5,
+    )
+    assert cfg["reward_mode"] == "pressure_sidewalk"
+    assert cfg["ped_reward_weight"] == 0.5
+
+
+def test_reward_modes_tuple_nonempty():
+    assert "pressure" in REWARD_MODES
+    assert "pressure_sidewalk" in REWARD_MODES
+
+
+def test_lane_is_sidewalk_accepts_tuple_from_getallowed(monkeypatch):
+    import src.simulation.env as env_mod
+
+    class FakeLane:
+        @staticmethod
+        def getAllowed(lane_id: str):
+            return ("pedestrian",)
+
+    monkeypatch.setattr(env_mod.traci, "lane", FakeLane(), raising=False)
+    assert MultiAgentTrafficEnv._lane_is_sidewalk_for_pedestrians("e_0") is True
+
+
+def test_lane_last_step_person_ids_uses_lane_api(monkeypatch):
+    import src.simulation.env as env_mod
+
+    class FakeLane:
+        @staticmethod
+        def getLastStepPersonIDs(lane_id: str):
+            return ["p1", "p2"]
+
+    monkeypatch.setattr(env_mod.traci, "lane", FakeLane(), raising=False)
+    assert _lane_last_step_person_ids("L") == ["p1", "p2"]
+
+
+def test_lane_last_step_person_ids_fallback_via_edge(monkeypatch):
+    import traci
+
+    import src.simulation.env as env_mod
+
+    class FakeLane:
+        getLastStepPersonIDs = None
+
+        @staticmethod
+        def getEdgeID(lane_id: str):
+            return "E0"
+
+    class FakeEdge:
+        @staticmethod
+        def getLastStepPersonIDs(edge_id: str):
+            return ["a", "b", "c"]
+
+    class FakePerson:
+        @staticmethod
+        def getLaneID(pid: str):
+            return {"a": "L1", "b": "L2", "c": "L1"}[pid]
+
+    fake = type("T", (), {})()
+    fake.lane = FakeLane()
+    fake.edge = FakeEdge()
+    fake.person = FakePerson()
+    fake.TraCIException = traci.TraCIException
+    monkeypatch.setattr(env_mod, "traci", fake)
+    assert set(_lane_last_step_person_ids("L1")) == {"a", "c"}
+
+
+def test_lane_last_step_person_ids_scan_when_edge_unsupported(monkeypatch):
+    import traci
+
+    import src.simulation.env as env_mod
+
+    class FakeLane:
+        getLastStepPersonIDs = None
+
+        @staticmethod
+        def getEdgeID(lane_id: str):
+            raise traci.TraCIException("no edge API")
+
+    class FakeEdge:
+        getLastStepPersonIDs = None
+
+    class FakePerson:
+        @staticmethod
+        def getIDList():
+            return ["x", "y"]
+
+        @staticmethod
+        def getLaneID(pid: str):
+            return "target" if pid == "y" else "other"
+
+    fake = type("T", (), {})()
+    fake.lane = FakeLane()
+    fake.edge = FakeEdge()
+    fake.person = FakePerson()
+    fake.TraCIException = traci.TraCIException
+    monkeypatch.setattr(env_mod, "traci", fake)
+    assert _lane_last_step_person_ids("target") == ["y"]
 
 
 def test_generate_random_traffic_with_pedestrians_calls_random_trips_twice(

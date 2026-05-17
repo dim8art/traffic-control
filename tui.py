@@ -88,6 +88,31 @@ def _prompt_simulation_traffic_extras() -> dict[str, object] | None:
     }
 
 
+def _prompt_reward_extras() -> dict[str, object] | None:
+    """reward_mode и опционально ped_reward_weight для *_sidewalk."""
+    from src.simulation.env import REWARD_MODES
+
+    choices = [Choice(title=rm, value=rm) for rm in REWARD_MODES]
+    rm = questionary.select(
+        "Режим награды",
+        choices=choices,
+        default="pressure",
+    ).ask()
+    if rm is None:
+        return None
+    ped_w = None
+    if "sidewalk" in str(rm):
+        custom = questionary.confirm(
+            "Задать вес пешеходов вручную (иначе по умолчанию 1.0)?",
+            default=False,
+        ).ask()
+        if custom is None:
+            return None
+        if custom:
+            ped_w = _prompt_float("Вес пешеходов", "1.0")
+    return {"reward_mode": rm, "ped_reward_weight": ped_w}
+
+
 def _prompt_demo_saliency() -> dict[str, object] | None:
     """Опции saliency для run_inference (консоль и при желании TensorBoard)."""
     use = questionary.confirm(
@@ -234,8 +259,11 @@ def _loop_train() -> None:
     traffic_extras = _prompt_simulation_traffic_extras()
     if traffic_extras is None:
         return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     questionary.print("Обучение…")
-    run_train(net_xml, period, duration, **traffic_extras)
+    run_train(net_xml, period, duration, **traffic_extras, **reward_extras)
 
 
 def _loop_sumo_freerun() -> None:
@@ -252,6 +280,9 @@ def _loop_sumo_freerun() -> None:
     traffic_extras = _prompt_simulation_traffic_extras()
     if traffic_extras is None:
         return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     questionary.print("Симуляция…")
     run_sumo_freerun(
         net_xml,
@@ -259,6 +290,7 @@ def _loop_sumo_freerun() -> None:
         period,
         gui,
         **traffic_extras,
+        **reward_extras,
     )
 
 
@@ -280,6 +312,9 @@ def _loop_demo() -> None:
     traffic_extras = _prompt_simulation_traffic_extras()
     if traffic_extras is None:
         return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     saliency_opts = _prompt_demo_saliency()
     if saliency_opts is None:
         return
@@ -291,6 +326,7 @@ def _loop_demo() -> None:
         period,
         gui,
         **traffic_extras,
+        **reward_extras,
         **saliency_opts,
     )
 
@@ -310,6 +346,9 @@ def _loop_benchmark() -> None:
     traffic_extras = _prompt_simulation_traffic_extras()
     if traffic_extras is None:
         return
+    reward_extras = _prompt_reward_extras()
+    if reward_extras is None:
+        return
     questionary.print("Сравнение…")
     run_comprehensive_benchmark(
         ckpt,
@@ -317,6 +356,7 @@ def _loop_benchmark() -> None:
         duration,
         period,
         **traffic_extras,
+        **reward_extras,
     )
 
 

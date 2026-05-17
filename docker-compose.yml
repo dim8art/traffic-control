@@ -1,0 +1,18 @@
+services:
+  traffic-control:
+    build: .
+    image: traffic-control:latest
+    working_dir: /app
+    # Ray и параллельные воркеры используют shared memory
+    shm_size: "2gb"
+    environment:
+      SUMO_HOME: /usr/share/sumo
+    volumes:
+      - ./data:/app/data
+      - ./ray_results:/app/ray_results
+      - ./checkpoints:/app/checkpoints
+    # Примеры:
+    #   docker compose run --rm traffic-control train --map data/sumo/vasilevsky.net.xml
+    #   docker compose run --rm traffic-control sumo --map data/sumo/vasilevsky.net.xml --no-gui
+    stdin_open: true
+    tty: true
