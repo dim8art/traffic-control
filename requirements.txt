@@ -1,27 +1,31 @@
+# SUMO >= 1.18 (Ubuntu: ppa:sumo/stable; macOS: brew install sumo).
+# traci/sumolib на pip должны совпадать с sumo --version (build.sh ставит их автоматически).
+# Не ставьте traci/sumolib вручную другой версии — иначе TraCI 0x7f и прочие ошибки.
+
 # Работа с картами и графами
 osmnx>=1.9.0
-networkx>=3.0
-geopandas>=0.14.0
+networkx>=3.2
+geopandas>=1.0.0
 shapely>=2.0.0
 
-# Машинное обучение (стандартные НС)
-torch>=2.0.0
+# Машинное обучение
+torch>=2.2.0
 tensorboard>=2.14.0
-numpy>=1.24.0
-pandas>=2.0.0
+numpy>=1.26.0,<3
+pandas>=2.1.0
 
-# Симуляция и RL-среды
-ray[rllib]
-stable-baselines3 
-shimmy
-sumo-rl>=1.4.3
-gymnasium>=0.28.1
+# Симуляция и RL (traci/sumolib — через build.sh, версия = SUMO)
+ray[rllib]>=2.40.0,<3
+stable-baselines3>=2.3.0
+shimmy>=2.0.0
+sumo-rl>=1.4.5
+gymnasium>=0.29.1
 pettingzoo>=1.24.0
 
 # Вспомогательные утилиты
-pyyaml
-matplotlib
-scipy
-duckdb
-pytest
+pyyaml>=6.0
+matplotlib>=3.8.0
+scipy>=1.11.0
+duckdb>=1.0.0
+pytest>=8.0.0
 questionary>=2.0.0

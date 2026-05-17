@@ -88,6 +88,20 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="T",
         help="Длина фрагмента rollout",
     )
+    train_parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Продолжить обучение: каталог trial или checkpoint_… в ray_results",
+    )
+    train_parser.add_argument(
+        "--training-iterations",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Остановка после N итераций обучения",
+    )
 
     demo_parser = subparsers.add_parser("demo", help="Запуск обученной политики в SUMO")
     demo_parser.add_argument("--checkpoint", type=str, required=True, help="Checkpoint path")
@@ -290,6 +304,8 @@ def main() -> None:
             num_env_runners=args.num_env_runners,
             rollout_fragment_length=args.rollout_fragment_length,
             sample_timeout_s=args.sample_timeout_s,
+            checkpoint_path=args.checkpoint,
+            training_iterations=args.training_iterations,
         )
     elif args.command == "demo":
         explain_every = args.explain_obs_every

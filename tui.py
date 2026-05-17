@@ -262,8 +262,32 @@ def _loop_train() -> None:
     reward_extras = _prompt_reward_extras()
     if reward_extras is None:
         return
+
+    checkpoint_path: str | None = None
+    resume = questionary.confirm(
+        "Продолжить обучение с checkpoint (Ray Tune)?",
+        default=False,
+    ).ask()
+    if resume is None:
+        return
+    if resume:
+        ckpt = _prompt_existing_path(
+            "Каталог trial (PPO_…) или checkpoint_000… в ray_results"
+        )
+        if not ckpt:
+            questionary.print("Путь не найден.")
+            return
+        checkpoint_path = ckpt
+
     questionary.print("Обучение…")
-    run_train(net_xml, period, duration, **traffic_extras, **reward_extras)
+    run_train(
+        net_xml,
+        period,
+        duration,
+        checkpoint_path=checkpoint_path,
+        **traffic_extras,
+        **reward_extras,
+    )
 
 
 def _loop_sumo_freerun() -> None:

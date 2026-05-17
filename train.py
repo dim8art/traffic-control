@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 
 from gymnasium import spaces
@@ -17,6 +18,34 @@ from src.simulation.env import (
     traffic_policy_observation_space,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def _resolve_tune_restore_dir(path: str) -> str:
+    """
+    Путь для tune.Tuner.restore: каталог trial (с params.json) или checkpoint_000…
+    внутри trial.
+    """
+    path = os.path.abspath(os.path.expanduser(path))
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Checkpoint path not found: {path}")
+
+    if os.path.basename(path).startswith("checkpoint_"):
+        path = os.path.dirname(path)
+
+    cur = path
+    while True:
+        if os.path.isfile(os.path.join(cur, "params.json")) or os.path.isfile(
+            os.path.join(cur, "params.pkl")
+        ):
+            return cur
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+
+    return path
+
 
 def run_train(
     sumo_net_xml_path: str,
@@ -32,6 +61,8 @@ def run_train(
     num_env_runners: int = 6,
     rollout_fragment_length: int = 50,
     sample_timeout_s: float = 600.0,
+    checkpoint_path: str | None = None,
+    training_iterations: int = 1000,
 ) -> None:
     if not os.path.exists(sumo_net_xml_path):
         raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
@@ -87,19 +118,33 @@ def run_train(
     config.train_batch_size = 4000
     config.sgd_minibatch_size = 256
     config.num_sgd_iter = 10
-    tuner = tune.Tuner(
-        "PPO",
-        param_space=config.to_dict(),
-        run_config=tune.RunConfig(
-            name="SUMO_PPO_FINAL",
-            stop={"training_iteration": 1000},
-            checkpoint_config=CheckpointConfig(
-                num_to_keep=3,
-                checkpoint_frequency=10,
-                checkpoint_at_end=True,
-            ),
+
+    run_config = RunConfig(
+        name="SUMO_PPO_FINAL",
+        stop={"training_iteration": training_iterations},
+        checkpoint_config=CheckpointConfig(
+            num_to_keep=3,
+            checkpoint_frequency=1,
+            checkpoint_at_end=True,
         ),
     )
+    param_space = config.to_dict()
+
+    if checkpoint_path:
+        restore_dir = _resolve_tune_restore_dir(checkpoint_path)
+        logger.info("Продолжение обучения из %s", restore_dir)
+        tuner = tune.Tuner.restore(
+            restore_dir,
+            trainable="PPO",
+            param_space=param_space,
+            run_config=run_config,
+        )
+    else:
+        tuner = tune.Tuner(
+            "PPO",
+            param_space=param_space,
+            run_config=run_config,
+        )
     tuner.fit()
 
 if __name__ == "__main__":
@@ -181,6 +226,20 @@ if __name__ == "__main__":
         metavar="T",
         help="Длина фрагмента rollout на воркер",
     )
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        metavar="DIR",
+        help="Продолжить обучение: каталог trial (PPO_…) или checkpoint_… в ray_results",
+    )
+    parser.add_argument(
+        "--training-iterations",
+        type=int,
+        default=1000,
+        metavar="N",
+        help="Остановка после N итераций (включая уже пройденные при --checkpoint)",
+    )
 
     args = parser.parse_args()
 
@@ -201,4 +260,6 @@ if __name__ == "__main__":
         num_env_runners=args.num_env_runners,
         rollout_fragment_length=args.rollout_fragment_length,
         sample_timeout_s=args.sample_timeout_s,
+        checkpoint_path=args.checkpoint,
+        training_iterations=args.training_iterations,
     )
