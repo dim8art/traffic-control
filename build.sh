@@ -6,14 +6,43 @@ cd "$ROOT"
 
 MIN_SUMO_VERSION="1.18.0"
 
+find_sumo_bin() {
+    local candidate
+    for candidate in "${SUMO_BIN:-}" sumo "${SUMO_HOME:-}/bin/sumo"; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        printf '%s' "$candidate"
+        return 0
+    done
+    return 1
+}
+
 sumo_version() {
-    sumo --version 2>/dev/null | head -1 | sed -n 's/.*Version \([0-9][0-9.]*\).*/\1/p'
+    local sumo_bin line ver
+    sumo_bin="$(find_sumo_bin)" || return 1
+    line="$("$sumo_bin" --version 2>&1 | head -1)"
+    # Eclipse SUMO sumo Version 1.26.0  /  SUMO Version 1.26.0  /  1.26.0
+    ver="$(printf '%s\n' "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+    if [[ -z "$ver" ]]; then
+        ver="$(printf '%s\n' "$line" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+    fi
+    [[ -n "$ver" ]] || return 1
+    printf '%s' "$ver"
 }
 
 require_sumo_min() {
     local ver="$1"
+    local sumo_bin line
     if [[ -z "$ver" ]]; then
-        echo "Ошибка: не удалось определить версию SUMO (sumo --version)." >&2
+        echo "Ошибка: не удалось определить версию SUMO." >&2
+        if sumo_bin="$(find_sumo_bin)"; then
+            line="$("$sumo_bin" --version 2>&1 | head -3)"
+            echo "  sumo: ${sumo_bin}" >&2
+            echo "  вывод: ${line:-<пусто>}" >&2
+        else
+            echo "  sumo не найден в PATH и в \${SUMO_HOME}/bin/sumo" >&2
+            echo "  Ubuntu: sudo add-apt-repository -y ppa:sumo/stable" >&2
+            echo "          sudo apt install sumo sumo-tools sumo-doc" >&2
+        fi
         exit 1
     fi
     if ! printf '%s\n%s\n' "$MIN_SUMO_VERSION" "$ver" | sort -C -V; then
@@ -64,11 +93,11 @@ if [[ -z "${SUMO_HOME:-}" ]]; then
     fi
 fi
 
-INSTALLED_SUMO_VER="$(sumo_version)"
-require_sumo_min "$INSTALLED_SUMO_VER"
-echo "SUMO ${INSTALLED_SUMO_VER} (${SUMO_HOME:-не задан})"
-
 export PATH="${SUMO_HOME}/bin:${PATH}"
+
+INSTALLED_SUMO_VER="$(sumo_version)" || INSTALLED_SUMO_VER=""
+require_sumo_min "$INSTALLED_SUMO_VER"
+echo "SUMO ${INSTALLED_SUMO_VER} (${SUMO_HOME:-не задан}, $(find_sumo_bin))"
 
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
     append_env_once "$rc" "export SUMO_HOME=${SUMO_HOME}"
