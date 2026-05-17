@@ -83,7 +83,13 @@ fi
 # 2. SUMO_HOME и PATH
 if [[ -z "${SUMO_HOME:-}" ]]; then
     if [[ "${OSTYPE:-}" == linux-gnu* ]]; then
-        export SUMO_HOME="/usr/share/sumo"
+        for d in /usr/share/sumo /usr/local/share/sumo; do
+            if [[ -x "${d}/bin/sumo" ]]; then
+                export SUMO_HOME="$d"
+                break
+            fi
+        done
+        export SUMO_HOME="${SUMO_HOME:-/usr/share/sumo}"
     elif [[ "${OSTYPE:-}" == darwin* ]]; then
         if [[ -d "/opt/homebrew/share/sumo" ]]; then
             export SUMO_HOME="/opt/homebrew/share/sumo"
