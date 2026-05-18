@@ -1,19 +1,80 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import logging
 import os
 import subprocess
+from typing import Any, Protocol
 
 import numpy as np
 import pandas as pd
 import ray
+import torch
 import traci
 from ray.rllib.algorithms.algorithm import Algorithm
 
 from src.simulation.env import REWARD_MODES, MultiAgentTrafficEnv, traffic_env_config
 
 logger = logging.getLogger(__name__)
+
+
+class _PolicyLike(Protocol):
+    def compute_single_action(
+        self,
+        obs: Any,
+        *,
+        policy_id: str = "traffic_policy",
+        explore: bool = False,
+    ) -> int: ...
+
+
+def _resolve_model_pt(checkpoint_path: str) -> str:
+    path = os.path.abspath(os.path.expanduser(checkpoint_path))
+    if path.endswith("model.pt"):
+        return path
+    if os.path.basename(path).startswith("checkpoint_"):
+        return os.path.join(path, "policies", "traffic_policy", "model", "model.pt")
+    candidates = sorted(glob.glob(os.path.join(path, "checkpoint_*")))
+    if not candidates:
+        raise FileNotFoundError(f"No checkpoint_* under {path}")
+    latest = candidates[-1]
+    return os.path.join(latest, "policies", "traffic_policy", "model", "model.pt")
+
+
+class TorchPolicyInference:
+    """Загрузка model.pt без algorithm_state.pkl (совместимость Python 3.10/3.11)."""
+
+    def __init__(self, checkpoint_path: str) -> None:
+        model_pt = _resolve_model_pt(checkpoint_path)
+        if not os.path.isfile(model_pt):
+            raise FileNotFoundError(f"Policy weights not found: {model_pt}")
+        self._model = torch.load(model_pt, map_location="cpu", weights_only=False)
+        self._model.eval()
+
+    def compute_single_action(
+        self,
+        obs: Any,
+        *,
+        policy_id: str = "traffic_policy",
+        explore: bool = False,
+    ) -> int:
+        del policy_id, explore
+        arr = np.asarray(obs, dtype=np.float32)
+        with torch.no_grad():
+            logits, _ = self._model({"obs": torch.tensor(arr[None])})
+        return int(logits.argmax(dim=-1).item())
+
+
+def load_policy(checkpoint_path: str) -> _PolicyLike:
+    try:
+        return Algorithm.from_checkpoint(os.path.abspath(os.path.expanduser(checkpoint_path)))
+    except Exception as exc:
+        logger.warning(
+            "Algorithm.from_checkpoint failed (%s); using model.pt inference",
+            exc,
+        )
+        return TorchPolicyInference(checkpoint_path)
 
 
 def generate_net_variant(base_net: str, variant_type: str, output_net: str) -> bool:
@@ -37,7 +98,7 @@ def generate_net_variant(base_net: str, variant_type: str, output_net: str) -> b
         return False
 
 def get_metrics(
-    algo: Algorithm | None,
+    algo: _PolicyLike | None,
     sumo_net_xml_path: str,
     duration: int,
     period: float,
@@ -70,6 +131,10 @@ def get_metrics(
     total_reward = 0
     waiting_times = []
     speeds = []
+    ep_tt_sum_car = 0.0
+    ep_tt_cnt_car = 0
+    ep_tt_sum_ped = 0.0
+    ep_tt_cnt_ped = 0
 
     while not done:
         if is_ppo and algo:
@@ -84,19 +149,35 @@ def get_metrics(
         obs, rewards, terminated, truncated, infos = env.step(actions)
         
         if "__common__" in infos:
-            waiting_times.append(infos["__common__"]["system_mean_waiting_time"])
-            speeds.append(infos["__common__"]["system_avg_speed"])
+            common = infos["__common__"]
+            waiting_times.append(common["system_mean_waiting_time"])
+            speeds.append(common["system_avg_speed"])
             if rewards:
                 total_reward += sum(rewards.values())
+            ds = common.get("trip_completed_tt_sum_car")
+            dc = common.get("trip_completed_count_car")
+            if ds is not None and dc is not None:
+                ep_tt_sum_car += float(ds)
+                ep_tt_cnt_car += int(dc)
+            ds = common.get("trip_completed_tt_sum_ped")
+            dc = common.get("trip_completed_count_ped")
+            if ds is not None and dc is not None:
+                ep_tt_sum_ped += float(ds)
+                ep_tt_cnt_ped += int(dc)
 
         done = terminated.get("__all__", False) or truncated.get("__all__", False)
     
     traci.close()
-    return {
+    metrics = {
         "Total Reward": total_reward,
         "Avg Speed (m/s)": np.mean(speeds) if speeds else 0,
-        "Wait Time (s)": np.mean(waiting_times) if waiting_times else 0
+        "Wait Time (s)": np.mean(waiting_times) if waiting_times else 0,
     }
+    if ep_tt_cnt_car > 0:
+        metrics["mean_completed_trip_time_car_s"] = ep_tt_sum_car / ep_tt_cnt_car
+    if ep_tt_cnt_ped > 0:
+        metrics["mean_completed_trip_time_pedestrian_s"] = ep_tt_sum_ped / ep_tt_cnt_ped
+    return metrics
 
 def run_comprehensive_benchmark(
     checkpoint_path: str,
@@ -114,7 +195,7 @@ def run_comprehensive_benchmark(
     if not ray.is_initialized():
         ray.init(ignore_reinit_error=True, logging_level="ERROR")
 
-    algo = Algorithm.from_checkpoint(checkpoint_path)
+    algo = load_policy(checkpoint_path)
     
     # Определяем варианты для тестирования
     # SOTL в netconvert напрямую не задается (требует сложной настройки детекторов),
@@ -160,6 +241,7 @@ def run_comprehensive_benchmark(
     df = pd.DataFrame(results).T.round(3)
     sep = "=" * 80
     logger.info("%s\nИтог benchmark (пересборка сетей)\n%s\n\n%s", sep, sep, df)
+    return results
     
     # Очистка временных файлов
     for v_id in ["actuated", "delay_based"]:
