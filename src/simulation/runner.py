@@ -44,7 +44,7 @@ class SumoRunner:
         unique_id: str = "default",
         port: int = 8813,
     ) -> None:
-        # Создаем персональную подпапку для воркера, чтобы файлы не перемешивались
+        # Создаём персональную подпапку для воркера, чтобы файлы не перемешивались.
         self.worker_dir = os.path.join(os.path.abspath(output_dir), f"run_{unique_id}")
         os.makedirs(self.worker_dir, exist_ok=True)
         
@@ -302,7 +302,7 @@ class SumoRunner:
         traci.start(cmd, port=self.port, label=self.unique_id, numRetries=10)
 
     def get_tls_state(self, tls_id):
-        # Твой код без изменений, он корректен
+        # Очередь и средняя скорость по уникальным полосам, управляемым TLS.
         controlled_lanes = traci.trafficlight.getControlledLanes(tls_id)
         unique_lanes = list(set(controlled_lanes))
         total_waiting_cars = 0
@@ -314,9 +314,7 @@ class SumoRunner:
         return total_waiting_cars, avg_speed
 
     def run_with_monitoring(self, gui=True, log_traffic=True):
-        """
-        Run simulation with traffic monitoring
-        """
+        """Запуск симуляции с периодическим логированием состояния светофоров."""
         self._maybe_preflight()
         sumo_binary = _resolve_sumo_binary(gui=gui)
         traci.start([sumo_binary, "-c", self.cfg_file])

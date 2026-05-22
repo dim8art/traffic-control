@@ -20,7 +20,7 @@ sumo_version() {
     local sumo_bin line ver
     sumo_bin="$(find_sumo_bin)" || return 1
     line="$("$sumo_bin" --version 2>&1 | head -1)"
-    # Eclipse SUMO sumo Version 1.26.0  /  SUMO Version 1.26.0  /  1.26.0
+    # Примеры формата `sumo --version`: Eclipse SUMO … 1.26.0 / SUMO Version 1.26.0 / 1.26.0
     ver="$(printf '%s\n' "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
     if [[ -z "$ver" ]]; then
         ver="$(printf '%s\n' "$line" | grep -oE '[0-9]+\.[0-9]+' | head -1)"

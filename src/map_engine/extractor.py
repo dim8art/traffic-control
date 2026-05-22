@@ -39,7 +39,7 @@ def load_graph_from_local_osm_extract(
 
     path = Path(file_path).expanduser().resolve()
     if not path.is_file():
-        raise FileNotFoundError(f"Network file does not exist: {path}")
+        raise FileNotFoundError(f"Файл карты не найден: {path}")
 
     name_lower = path.name.lower()
 
@@ -99,7 +99,7 @@ def load_osm_drive_graph(
 
     path = Path(file_path).expanduser().resolve()
     if not path.is_file():
-        raise FileNotFoundError(f"Network file does not exist: {path}")
+        raise FileNotFoundError(f"Файл карты не найден: {path}")
 
     name_lower = path.name.lower()
 
@@ -244,10 +244,10 @@ class MapExtractor:
         nodes, _ = ox.graph_to_gdfs(self.graph)
         
         if 'highway' in nodes.columns:
-            # 1. Standard node signals
+            # 1. Обычные узлы-светофоры.
             standard_signals = nodes[nodes['highway'] == 'traffic_signals']
             
-            # 2. Add crossing signals if they exist (sometimes labeled as crossings)
+            # 2. Переходы, помеченные как traffic_signals (иногда highway=crossing).
             crossing_signals = nodes[nodes['highway'].isin(['crossing']) & 
                                     (nodes.get('crossing') == 'traffic_signals')]
             
@@ -261,8 +261,7 @@ class MapExtractor:
 
     def get_adjacency_list(self):
         """
-        Builds a neighbor map for distributed agents.
-        Returns a dictionary where keys are signal IDs and values are adjacent node IDs.
+        Карта соседей для распределённых агентов: ключ — id сигнала, значение — id смежных узлов.
         """
         adj_map = {}
         if self.signals is None:
@@ -276,7 +275,7 @@ class MapExtractor:
         return adj_map
 
     def save_osm_xml(self, filename):
-        """Saves the graph in native OSM XML format for SUMO compatibility."""
+        """Сохранение графа в нативном OSM XML для совместимости с SUMO."""
         output_dir = "data/network"
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -298,15 +297,15 @@ class MapExtractor:
 
         for node in self.graph.nodes():
             if node in signal_ids:
-                node_colors.append('#FF4500') # Оранжево-красный для светофоров
+                node_colors.append('#FF4500')  # оранжево-красный для светофоров
                 node_sizes.append(50)
             else:
-                node_colors.append('#666666') # Серый для обычных узлов
+                node_colors.append('#666666')  # серый для обычных узлов
                 node_sizes.append(15)
 
 
         if not node_sizes:
-            node_sizes = 15 # Стандартный размер, если списки пусты
+            node_sizes = 15  # стандартный размер, если списки пусты
             node_colors = '#666666'
 
         try:

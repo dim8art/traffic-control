@@ -3,14 +3,17 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import re
+from datetime import datetime
 
 from gymnasium import spaces
 
 from ray import tune
-from ray.tune import CheckpointConfig, RunConfig
+from ray.tune import CheckpointConfig, RunConfig, TuneConfig
 from ray.rllib.algorithms.ppo import PPOConfig
 
 from src.simulation.env import (
+    REWARD_MODE_ALL,
     REWARD_MODES,
     MultiAgentTrafficEnv,
     TrafficCallbacks,
@@ -20,6 +23,63 @@ from src.simulation.env import (
 
 logger = logging.getLogger(__name__)
 
+RAY_RESULTS_ROOT = "ray_results"
+
+
+def _slug_part(text: str, *, max_len: int = 48) -> str:
+    out = re.sub(r"[^\w.-]+", "-", str(text).strip())
+    out = re.sub(r"-+", "-", out).strip("-")
+    return out[:max_len] or "x"
+
+
+def _fmt_num(value: float) -> str:
+    return f"{value:g}".replace(".", "p")
+
+
+def _fmt_optional_period(value: float | None) -> str:
+    return "auto" if value is None else _fmt_num(value)
+
+
+def build_training_run_name(
+    sumo_net_xml_path: str,
+    traffic_period: float,
+    duration: int,
+    *,
+    training_iterations: int,
+    reward_mode: str,
+    enable_pedestrians: bool,
+    enable_public_transport: bool,
+    pedestrian_period: float | None,
+    public_transport_period: float | None,
+    ped_reward_weight: float | None,
+    num_env_runners: int,
+    rollout_fragment_length: int,
+    started_at: datetime | None = None,
+) -> str:
+    """Имя эксперимента Ray Tune: дата-время и ключевые параметры запуска."""
+    ts = (started_at or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    map_stem = os.path.splitext(os.path.basename(sumo_net_xml_path))[0]
+    if map_stem.endswith(".net"):
+        map_stem = map_stem[:-4]
+    map_name = _slug_part(map_stem, max_len=32)
+    parts = [
+        ts,
+        map_name,
+        f"p{_fmt_num(traffic_period)}",
+        f"d{duration}",
+        f"rm{_slug_part(reward_mode, max_len=24)}",
+        f"iter{training_iterations}",
+        f"env{num_env_runners}",
+        f"rf{rollout_fragment_length}",
+    ]
+    if enable_pedestrians:
+        parts.append(f"ped{_fmt_optional_period(pedestrian_period)}")
+    if enable_public_transport:
+        parts.append(f"bus{_fmt_optional_period(public_transport_period)}")
+    if ped_reward_weight is not None:
+        parts.append(f"pw{_fmt_num(ped_reward_weight)}")
+    return "_".join(parts)
+
 
 def _resolve_tune_restore_dir(path: str) -> str:
     """
@@ -28,7 +88,7 @@ def _resolve_tune_restore_dir(path: str) -> str:
     """
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.exists(path):
-        raise FileNotFoundError(f"Checkpoint path not found: {path}")
+        raise FileNotFoundError(f"Путь к чекпоинту не найден: {path}")
 
     if os.path.basename(path).startswith("checkpoint_"):
         path = os.path.dirname(path)
@@ -62,10 +122,44 @@ def run_train(
     rollout_fragment_length: int = 50,
     sample_timeout_s: float = 600.0,
     checkpoint_path: str | None = None,
-    training_iterations: int = 1000,
+    training_iterations: int = 50,
 ) -> None:
+    if reward_mode == REWARD_MODE_ALL:
+        if checkpoint_path:
+            logger.warning(
+                "Режим «all»: --checkpoint игнорируется — для каждого reward_mode свой каталог в ray_results.",
+            )
+        total = len(REWARD_MODES)
+        for index, mode in enumerate(REWARD_MODES, start=1):
+            logger.info(
+                "Обучение %s/%s, reward_mode=%s",
+                index,
+                total,
+                mode,
+            )
+            run_train(
+                sumo_net_xml_path,
+                traffic_period,
+                duration,
+                enable_pedestrians=enable_pedestrians,
+                pedestrian_period=pedestrian_period,
+                enable_public_transport=enable_public_transport,
+                public_transport_period=public_transport_period,
+                reward_mode=mode,
+                ped_reward_weight=(
+                    ped_reward_weight if "sidewalk" in mode else None
+                ),
+                num_env_runners=num_env_runners,
+                rollout_fragment_length=rollout_fragment_length,
+                sample_timeout_s=sample_timeout_s,
+                checkpoint_path=None,
+                training_iterations=training_iterations,
+            )
+        logger.info("Обучение по всем режимам награды завершено (%s прогонов).", total)
+        return
+
     if not os.path.exists(sumo_net_xml_path):
-        raise FileNotFoundError(f"SUMO network not found: {sumo_net_xml_path}")
+        raise FileNotFoundError(f"SUMO-сеть не найдена: {sumo_net_xml_path}")
 
     env_cfg = traffic_env_config(
         sumo_net_xml_path,
@@ -119,36 +213,69 @@ def run_train(
     config.sgd_minibatch_size = 256
     config.num_sgd_iter = 10
 
-    run_config = RunConfig(
-        name="SUMO_PPO_FINAL",
-        stop={"training_iteration": training_iterations},
-        checkpoint_config=CheckpointConfig(
-            num_to_keep=3,
-            checkpoint_frequency=1,
-            checkpoint_at_end=True,
-        ),
+    checkpoint_cfg = CheckpointConfig(
+        num_to_keep=3,
+        checkpoint_frequency=1,
+        checkpoint_at_end=True,
+    )
+    tune_config = TuneConfig(
+        num_samples=1,
+        trial_dirname_creator=lambda _: "train",
     )
     param_space = config.to_dict()
 
     if checkpoint_path:
         restore_dir = _resolve_tune_restore_dir(checkpoint_path)
         logger.info("Продолжение обучения из %s", restore_dir)
+        run_config = RunConfig(
+            stop={"training_iteration": training_iterations},
+            checkpoint_config=checkpoint_cfg,
+        )
         tuner = tune.Tuner.restore(
             restore_dir,
             trainable="PPO",
             param_space=param_space,
             run_config=run_config,
+            tune_config=tune_config,
         )
     else:
+        run_name = build_training_run_name(
+            sumo_net_xml_path,
+            traffic_period,
+            duration,
+            training_iterations=training_iterations,
+            reward_mode=reward_mode,
+            enable_pedestrians=enable_pedestrians,
+            enable_public_transport=enable_public_transport,
+            pedestrian_period=pedestrian_period,
+            public_transport_period=public_transport_period,
+            ped_reward_weight=ped_reward_weight,
+            num_env_runners=num_env_runners,
+            rollout_fragment_length=rollout_fragment_length,
+        )
+        storage_root = os.path.abspath(RAY_RESULTS_ROOT)
+        os.makedirs(storage_root, exist_ok=True)
+        logger.info(
+            "Каталог обучения и чекпоинтов: %s/%s/train/checkpoint_*",
+            storage_root,
+            run_name,
+        )
+        run_config = RunConfig(
+            name=run_name,
+            storage_path=storage_root,
+            stop={"training_iteration": training_iterations},
+            checkpoint_config=checkpoint_cfg,
+        )
         tuner = tune.Tuner(
             "PPO",
             param_space=param_space,
             run_config=run_config,
+            tune_config=tune_config,
         )
     tuner.fit()
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Start RL training for SUMO agent")
+    parser = argparse.ArgumentParser(description="Обучение RL-агента для SUMO")
     parser.add_argument(
         "--map",
         type=str,
@@ -159,13 +286,13 @@ if __name__ == "__main__":
         "--period",
         type=float,
         default=0.5,
-        help="Traffic generation period (lower = more traffic, e.g. 0.2)",
+        help="Интервал генерации трафика (меньше — плотнее, напр. 0.2)",
     )
     parser.add_argument(
         "--duration",
         type=int,
         default=3600,
-        help="Simulation duration in seconds",
+        help="Длительность симуляции, с",
     )
     parser.add_argument(
         "--with-pedestrians",
@@ -194,9 +321,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reward-mode",
         type=str,
-        choices=list(REWARD_MODES),
+        choices=[*REWARD_MODES, REWARD_MODE_ALL],
         default="pressure",
-        help="Функция награды (в т.ч. *_sidewalk — см. src/simulation/env.py)",
+        help="Функция награды; all — подряд все режимы из REWARD_MODES (отдельный каталог на каждый)",
     )
     parser.add_argument(
         "--ped-reward-weight",
@@ -236,7 +363,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--training-iterations",
         type=int,
-        default=1000,
+        default=50,
         metavar="N",
         help="Остановка после N итераций (включая уже пройденные при --checkpoint)",
     )

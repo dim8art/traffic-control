@@ -102,7 +102,7 @@ def main(
     preview: bool = False,
     fast: bool = False,
 ) -> None:
-    """Build SUMO network from a **local** OSM/PBF/graphml + region filter."""
+    """Построение сети SUMO из локального OSM/PBF/graphml и фильтра региона."""
 
     osm_xml_path = f"data/network/{name}.osm"
 
@@ -201,7 +201,7 @@ def main(
 
 
 def register_prepare_arguments(parser: argparse.ArgumentParser) -> None:
-    """Shared CLI for ``prepare`` (used by ``prepare_map.py`` and ``main.py``)."""
+    """Общие аргументы CLI ``prepare`` (для ``prepare_map.py`` и ``main.py``)."""
 
     parser.add_argument(
         "--map",
@@ -221,7 +221,7 @@ def register_prepare_arguments(parser: argparse.ArgumentParser) -> None:
         nargs=3,
         metavar=("LAT", "LON", "RADIUS_M"),
         type=float,
-        help="Обрезка по bbox: центр LAT, LON и полуразмер RADIUS_M (метры, как в OSMnx bbox_from_point)",
+        help="Обрезка по bbox: широта, долгота и радиус RADIUS_M (м; как в OSMnx bbox_from_point)",
     )
     zone.add_argument(
         "--polygon",

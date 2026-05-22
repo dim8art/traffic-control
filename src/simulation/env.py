@@ -16,6 +16,9 @@ REWARD_MODES: tuple[str, ...] = (
     "lane_delay_sidewalk",
 )
 
+# Специальное значение CLI/TUI: последовательно обучить на каждом из REWARD_MODES.
+REWARD_MODE_ALL = "all"
+
 _LANE_VEHICLE_VCLASSES = frozenset(
     {
         "passenger",
@@ -121,6 +124,7 @@ def traffic_env_config(
     public_transport_period: float | None = None,
     reward_mode: str = "pressure",
     ped_reward_weight: float | None = None,
+    use_phase_actions: bool = False,
 ) -> dict:
     """
     Единый словарь для MultiAgentTrafficEnv (Ray / демо / benchmark).
@@ -128,7 +132,9 @@ def traffic_env_config(
     """
     rm = str(reward_mode or "pressure").strip().lower()
     if rm not in REWARD_MODES:
-        raise ValueError(f"reward_mode must be one of {list(REWARD_MODES)}, got {reward_mode!r}")
+        raise ValueError(
+            f"reward_mode должен быть одним из {list(REWARD_MODES)}, получено {reward_mode!r}"
+        )
     cfg: dict = {
         "net_file": net_file,
         "traffic_period": traffic_period,
@@ -144,6 +150,8 @@ def traffic_env_config(
         cfg["public_transport_period"] = float(public_transport_period)
     if ped_reward_weight is not None:
         cfg["ped_reward_weight"] = float(ped_reward_weight)
+    if use_phase_actions:
+        cfg["use_phase_actions"] = True
     return cfg
 
 
@@ -213,14 +221,14 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self.net_file = config["net_file"]
         self.traffic_period = config.get("traffic_period", 0.5)
         self.duration = config.get("duration", 3600)
-        # Neighbor features are intentionally down-weighted so local metrics dominate.
+        # Признаки соседей намеренно ослаблены, чтобы доминировали локальные метрики.
         self.neighbor_obs_weight = float(config.get("neighbor_obs_weight", 0.35))
-        # Reward shaping weights: local component is primary, neighbor component is auxiliary.
+        # Веса награды: локальная компонента основная, соседняя — вспомогательная.
         self.local_reward_weight = float(config.get("local_reward_weight", 1.0))
         self.neighbor_reward_weight = float(config.get("neighbor_reward_weight", 0.2))
         self.switch_penalty = float(config.get("switch_penalty", 0.1))
         self.outgoing_halt_weight = float(config.get("outgoing_halt_weight", 0.3))
-        # Maximum number of decision steps without phase change for each TLS.
+        # Максимум шагов решения без смены фазы для каждого TLS.
         self.max_idle_decision_steps = int(config.get("max_idle_decision_steps", 8))
 
         worker_index = getattr(config, "worker_index", 0)
@@ -241,7 +249,8 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         reward_mode = str(config.get("reward_mode", "pressure")).strip().lower()
         if reward_mode not in REWARD_MODES:
             raise ValueError(
-                f"reward_mode must be one of {list(REWARD_MODES)}, got {config.get('reward_mode')!r}",
+                f"reward_mode должен быть одним из {list(REWARD_MODES)}, "
+                f"получено {config.get('reward_mode')!r}",
             )
         self.reward_mode = reward_mode
         self.ped_reward_weight = float(config.get("ped_reward_weight", 1.0))
@@ -267,9 +276,10 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         self._veh_depart_times: dict[str, float] = {}
         self._veh_vclass: dict[str, str] = {}
         self._ped_depart_times: dict[str, float] = {}
-        # SUMO < ~1.18: edge VAR_BIDI unsupported → skip getBidiEdge after first TraCI error (avoids log spam).
+        # SUMO < ~1.18: edge VAR_BIDI не поддерживается — после первой TraCI-ошибки не вызывать getBidiEdge.
         self._edge_get_bidi_supported: bool | None = None
         self._sidewalk_lanes_by_tls: dict[str, frozenset[str]] | None = None
+        self.use_phase_actions = bool(config.get("use_phase_actions", False))
         super().__init__()
 
     def reset(self, *, seed=None, options=None, worker_port=None):
@@ -322,31 +332,50 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         traci.switch(self.runner.unique_id)
         forced_switches_step = 0
         effective_actions = {}
-        for tls_id in self._agent_ids:
-            action = action_dict.get(tls_id, 0)
-            if tls_id not in self._agent_ids:
-                continue
 
-            should_switch = action == 1
-            if not should_switch and self.idle_steps.get(tls_id, 0) >= self.max_idle_decision_steps:
-                # Hard cap on idle duration: force a phase change.
-                should_switch = True
-                forced_switches_step += 1
+        switch_for_reward: dict[str, int] = {}
+        if self.use_phase_actions:
+            for tls_id in self._agent_ids:
+                phase_idx = int(action_dict.get(tls_id, traci.trafficlight.getPhase(tls_id)))
+                logic = traci.trafficlight.getAllProgramLogics(tls_id)[0]
+                n_phases = len(logic.phases)
+                if n_phases > 0:
+                    phase_idx = phase_idx % n_phases
+                traci.trafficlight.setPhase(tls_id, phase_idx)
+                prev = self.last_actions.get(tls_id)
+                effective_actions[tls_id] = phase_idx
+                switched = prev is not None and prev != phase_idx
+                switch_for_reward[tls_id] = 1 if switched else 0
+                self.last_actions[tls_id] = phase_idx
+                if switched:
+                    self.idle_steps[tls_id] = 0
+                else:
+                    self.idle_steps[tls_id] = self.idle_steps.get(tls_id, 0) + 1
+        else:
+            for tls_id in self._agent_ids:
+                action = action_dict.get(tls_id, 0)
+                if tls_id not in self._agent_ids:
+                    continue
 
-            if should_switch:
-                self._handle_phase_change(tls_id)
-                self.idle_steps[tls_id] = 0
-                effective_actions[tls_id] = 1
-            else:
-                self.idle_steps[tls_id] = self.idle_steps.get(tls_id, 0) + 1
-                effective_actions[tls_id] = 0
+                should_switch = action == 1
+                if not should_switch and self.idle_steps.get(tls_id, 0) >= self.max_idle_decision_steps:
+                    should_switch = True
+                    forced_switches_step += 1
 
-            self.last_actions[tls_id] = effective_actions[tls_id]
+                if should_switch:
+                    self._handle_phase_change(tls_id)
+                    self.idle_steps[tls_id] = 0
+                    effective_actions[tls_id] = 1
+                else:
+                    self.idle_steps[tls_id] = self.idle_steps.get(tls_id, 0) + 1
+                    effective_actions[tls_id] = 0
 
-        for tls_id, action in action_dict.items():
-            if tls_id in self._agent_ids:
-                if tls_id not in effective_actions:
-                    effective_actions[tls_id] = int(action == 1)
+                self.last_actions[tls_id] = effective_actions[tls_id]
+
+            for tls_id, action in action_dict.items():
+                if tls_id in self._agent_ids:
+                    if tls_id not in effective_actions:
+                        effective_actions[tls_id] = int(action == 1)
 
         trip_batch = self._empty_trip_batch()
         for _ in range(15):
@@ -360,7 +389,12 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         rewards = {}
         for a_id in self._agent_ids:
             observations[a_id] = self._get_local_obs(a_id)
-            rewards[a_id] = self._get_local_reward(a_id, effective_actions.get(a_id, 0))
+            if self.use_phase_actions:
+                rewards[a_id] = self._get_local_reward(
+                    a_id, switch_for_reward.get(a_id, 0)
+                )
+            else:
+                rewards[a_id] = self._get_local_reward(a_id, effective_actions.get(a_id, 0))
 
         is_terminated = traci.simulation.getMinExpectedNumber() <= 0
         terminations = {a_id: is_terminated for a_id in self._agent_ids}
@@ -635,7 +669,7 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
             return self._get_tls_inbound_queue(tls_id) + w * self._get_tls_sidewalk_ped_halting_count(tls_id)
         if self.reward_mode == "lane_delay_sidewalk":
             return self._get_tls_inbound_lane_delay(tls_id) + w * self._get_tls_sidewalk_ped_waiting_sum(tls_id)
-        raise RuntimeError(f"unexpected reward_mode: {self.reward_mode!r}")
+        raise RuntimeError(f"неожиданный reward_mode: {self.reward_mode!r}")
 
     def _get_local_reward(self, tls_id, action):
         local_signal = self._get_tls_reward_signal(tls_id)
@@ -655,11 +689,11 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         return reward
 
     def _get_tls_pressure(self, tls_id):
-        # Inbound queue near current traffic light.
+        # Очередь на въездах у данного светофора.
         lanes_in = traci.trafficlight.getControlledLanes(tls_id)
         halt_in = sum([traci.lane.getLastStepHaltingNumber(l) for l in set(lanes_in)])
 
-        # Outbound queue that the intersection pushes traffic into.
+        # Очередь на выездах, куда перекрёсток направляет поток.
         links = traci.trafficlight.getControlledLinks(tls_id)
         out_lanes = set()
         for link in links:
@@ -750,9 +784,7 @@ class MultiAgentTrafficEnv(MultiAgentEnv):
         return batch
 
     def get_system_metrics(self):
-        """
-        Collect all traffic data
-        """
+        """Агрегированные метрики трафика по всем ТС в симуляции."""
         vehicle_ids = traci.vehicle.getIDList()
         if not vehicle_ids:
             return {

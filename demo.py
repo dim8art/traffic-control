@@ -80,7 +80,7 @@ def run_sumo_freerun(
     total_reward = 0.0
     logger.info("SUMO: симуляция без модели (RL отключён)")
     if gui:
-        logger.info("GUI: при необходимости нажмите «Play» в SUMO.")
+        logger.info("GUI: при необходимости нажмите «Старт» в SUMO.")
 
     try:
         done = False
@@ -134,6 +134,7 @@ def run_inference(
 
     explain_policy = algo.get_policy("traffic_policy")
 
+    tb_log_dir: str | None = None
     if tensorboard_dir:
         try:
             from torch.utils.tensorboard import SummaryWriter
@@ -141,18 +142,22 @@ def run_inference(
             raise ImportError(
                 "Для --tensorboard-dir установите зависимость: pip install tensorboard"
             ) from exc
-        os.makedirs(tensorboard_dir, exist_ok=True)
-        tb_writer = SummaryWriter(log_dir=tensorboard_dir)
+        tb_log_dir = os.path.abspath(tensorboard_dir)
+        os.makedirs(tb_log_dir, exist_ok=True)
+        tb_writer = SummaryWriter(log_dir=tb_log_dir)
+        tb_writer.add_scalar("demo_saliency/_meta/writer_ready", 1.0, 0)
+        tb_writer.flush()
         logger.info(
-            "TensorBoard saliency: каждые %s шаг(ов) RL → %s  (Scalars: "
-            "demo_saliency/mean_abs/*, demo_saliency/share_sum/*). "
-            "Просмотр: tensorboard --logdir %s",
+            "TensorBoard saliency: каждые %s шаг(ов) RL → %s\n"
+            "  В UI: Scalars, фильтр «demo_saliency» (mean_abs/*, share_sum/*, aggregate/l1_norm).\n"
+            "  Запуск: tensorboard --logdir %s\n"
+            "  Saliency пишется только в demo (не в ray_results при train).",
             max(1, tensorboard_saliency_every),
-            tensorboard_dir,
-            tensorboard_dir,
+            tb_log_dir,
+            tb_log_dir,
         )
 
-    # 4. Создание среды для демонстрации
+    # Создание среды для демонстрации
     env_config = traffic_env_config(
         sumo_net_xml_path,
         traffic_period=period,
@@ -173,7 +178,7 @@ def run_inference(
     total_reward = 0
 
     logger.info("Запуск демонстрации политики")
-    logger.info("Если включён GUI, нажмите «Play» в окне SUMO.")
+    logger.info("Если включён GUI, нажмите «Старт» в окне SUMO.")
 
     if explain_obs_every:
         logger.info(
@@ -187,6 +192,7 @@ def run_inference(
         )
 
     rl_iteration = 0
+    tb_writes = 0
 
     try:
         # Цикл симуляции
@@ -223,7 +229,7 @@ def run_inference(
                         grad_ok.append(np.asarray(g, dtype=np.float32))
                         if log_console:
                             logger.info(
-                                "Saliency step=%s tls=%s action=%s top|∇| %s",
+                                "Saliency шаг=%s tls=%s действие=%s топ|∇| %s",
                                 rl_iteration,
                                 tls_id,
                                 action_int,
@@ -241,16 +247,24 @@ def run_inference(
                             tls_id,
                             exc,
                         )
-                if log_tb and grad_ok:
-                    aggregated = mean_abs_saliency_across_tls(grad_ok)
-                    log_saliency_tensorboard_scalar_groups(
-                        tb_writer,
-                        rl_iteration,
-                        aggregated,
-                        prefix="demo_saliency",
-                        enable_pedestrians=enable_pedestrians,
-                        enable_public_transport=enable_public_transport,
-                    )
+                if log_tb:
+                    if grad_ok:
+                        aggregated = mean_abs_saliency_across_tls(grad_ok)
+                        log_saliency_tensorboard_scalar_groups(
+                            tb_writer,
+                            rl_iteration,
+                            aggregated,
+                            prefix="demo_saliency",
+                            enable_pedestrians=enable_pedestrians,
+                            enable_public_transport=enable_public_transport,
+                        )
+                        tb_writes += 1
+                    else:
+                        logger.warning(
+                            "TensorBoard: на шаге %s saliency не записана "
+                            "(градиент log π не посчитан ни для одного TLS).",
+                            rl_iteration,
+                        )
 
             # Шаг среды
             obs, rewards, terminated, truncated, infos = env.step(actions)
@@ -263,6 +277,19 @@ def run_inference(
             rl_iteration += 1
 
         logger.info("Тест завершён. Суммарная награда: %s", total_reward)
+        if tb_writer is not None:
+            if tb_writes == 0:
+                logger.warning(
+                    "TensorBoard: файл событий в %s, но saliency-скаляры не записаны. "
+                    "Проверьте framework=torch в чекпоинте и размерность наблюдения.",
+                    tb_log_dir,
+                )
+            else:
+                logger.info(
+                    "TensorBoard: записано %s шаг(ов) saliency в %s",
+                    tb_writes,
+                    tb_log_dir,
+                )
 
     except Exception as e:
         logger.exception("Ошибка во время выполнения: %s", e)
@@ -343,7 +370,7 @@ if __name__ == "__main__":
         const=1,
         default=None,
         metavar="STEPS",
-        help="Каждые STEPS решений RL печать top saliency по наблюдению (градиент log π); "
+        help="Каждые STEPS решений RL печать топ saliency по наблюдению (градиент log π); "
         "флаг без числа ⇒ 1",
     )
     parser.add_argument(
@@ -357,7 +384,7 @@ if __name__ == "__main__":
         type=str,
         default=None,
         metavar="DIR",
-        help="Каталог логов TensorBoard: средние |∂log π/∂obs| по выбранным TLS (Scalars)",
+        help="Каталог логов TensorBoard: средние |∂log π/∂obs| по выбранным TLS (скаляры)",
     )
     parser.add_argument(
         "--tensorboard-saliency-every",

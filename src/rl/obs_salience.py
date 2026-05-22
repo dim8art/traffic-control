@@ -162,6 +162,50 @@ def mean_abs_saliency_across_tls(per_tls_gradients: Sequence[np.ndarray]) -> np.
     return np.mean(abs_k, axis=0)
 
 
+def try_log_ppo_observation_saliency(
+    *,
+    policy: Any,
+    obs: dict[str, np.ndarray],
+    actions: dict[str, Any],
+    global_step: int,
+    tb_writer: Any | None = None,
+    tb_prefix: str = "saliency",
+    explain_tls_limit: int = 2,
+    enable_pedestrians: bool = False,
+    enable_public_transport: bool = False,
+) -> int:
+    """
+    Saliency для PPO: градиент log π по наблюдению для выбранных TLS.
+    При заданном tb_writer пишет скаляры в TensorBoard. Возвращает число успешных TLS.
+    """
+    tls_ids_sorted = sorted(obs.keys())[: max(1, explain_tls_limit)]
+    grad_ok: list[np.ndarray] = []
+    for tls_id in tls_ids_sorted:
+        obs_vec = np.asarray(obs[tls_id], dtype=np.float32)
+        act_val = actions[tls_id]
+        action_int = int(act_val.item() if hasattr(act_val, "item") else act_val)
+        try:
+            g = observation_saliency_logp_gradient(
+                policy,
+                obs_vec,
+                taken_action=action_int,
+            )
+            grad_ok.append(np.asarray(g, dtype=np.float32))
+        except Exception:
+            continue
+    if tb_writer is not None and grad_ok:
+        aggregated = mean_abs_saliency_across_tls(grad_ok)
+        log_saliency_tensorboard_scalar_groups(
+            tb_writer,
+            global_step,
+            aggregated,
+            prefix=tb_prefix,
+            enable_pedestrians=enable_pedestrians,
+            enable_public_transport=enable_public_transport,
+        )
+    return len(grad_ok)
+
+
 def log_saliency_tensorboard_scalar_groups(
     writer: Any,
     global_step: int,
@@ -184,4 +228,8 @@ def log_saliency_tensorboard_scalar_groups(
         writer.add_scalar(f"{prefix}/share_sum/{name}", float(abs_vals[i] / total), global_step)
 
     writer.add_scalar(f"{prefix}/aggregate/l1_norm", float(np.sum(abs_vals)), global_step)
+    writer.add_scalar(f"{prefix}/_meta/features_logged", float(len(labels)), global_step)
+    flush = getattr(writer, "flush", None)
+    if callable(flush):
+        flush()
 

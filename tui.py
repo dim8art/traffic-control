@@ -40,10 +40,12 @@ def _prompt_float(title: str, default: str) -> float:
         return float(default)
 
 
-def _prompt_simulation_traffic_extras() -> dict[str, object] | None:
+def _prompt_simulation_traffic_extras(
+    *, traffic_period: float = 0.5
+) -> dict[str, object] | None:
     """
     Пешеходы / ОТ — те же опции, что --with-pedestrians и --with-public-transport в CLI.
-    Возвращает None, если пользователь прервал подтверждение.
+    Возвращает None, если пользователь прервал ввод.
     """
     ped = questionary.confirm(
         "Добавить пешеходов (нужна пешеходная сеть в .net.xml)?",
@@ -60,25 +62,17 @@ def _prompt_simulation_traffic_extras() -> dict[str, object] | None:
 
     ped_period: float | None = None
     if ped:
-        custom = questionary.confirm(
-            "Задать интервал пешеходов вручную (иначе от автоматического правила)?",
-            default=False,
-        ).ask()
-        if custom is None:
-            return None
-        if custom:
-            ped_period = _prompt_float("Интервал между пешеходами, с", "2.0")
+        ped_period = _prompt_float(
+            "Интервал пешеходов, с",
+            f"{max(traffic_period * 2.0, 1.0):g}",
+        )
 
     pt_period: float | None = None
     if pt:
-        custom = questionary.confirm(
-            "Задать интервал автобусов вручную?",
-            default=False,
-        ).ask()
-        if custom is None:
-            return None
-        if custom:
-            pt_period = _prompt_float("Интервал рейсов ОТ, с", "3.0")
+        pt_period = _prompt_float(
+            "Интервал рейсов ОТ, с",
+            f"{max(traffic_period * 3.0, 2.0):g}",
+        )
 
     return {
         "enable_pedestrians": bool(ped),
@@ -89,10 +83,13 @@ def _prompt_simulation_traffic_extras() -> dict[str, object] | None:
 
 
 def _prompt_reward_extras() -> dict[str, object] | None:
-    """reward_mode и опционально ped_reward_weight для *_sidewalk."""
-    from src.simulation.env import REWARD_MODES
+    """Режим награды reward_mode и опционально ped_reward_weight для *_sidewalk."""
+    from src.simulation.env import REWARD_MODE_ALL, REWARD_MODES
 
-    choices = [Choice(title=rm, value=rm) for rm in REWARD_MODES]
+    choices = [
+        Choice(title="Все режимы подряд", value=REWARD_MODE_ALL),
+        *[Choice(title=rm, value=rm) for rm in REWARD_MODES],
+    ]
     rm = questionary.select(
         "Режим награды",
         choices=choices,
@@ -100,47 +97,48 @@ def _prompt_reward_extras() -> dict[str, object] | None:
     ).ask()
     if rm is None:
         return None
-    ped_w = None
-    if "sidewalk" in str(rm):
-        custom = questionary.confirm(
-            "Задать вес пешеходов вручную (иначе по умолчанию 1.0)?",
-            default=False,
-        ).ask()
-        if custom is None:
-            return None
-        if custom:
-            ped_w = _prompt_float("Вес пешеходов", "1.0")
+    ped_w: float | None = None
+    if rm == REWARD_MODE_ALL:
+        raw = _prompt_text(
+            "Вес пешеходов для *_sidewalk (пусто — 1.0 по умолчанию)", ""
+        )
+        if raw and raw.strip():
+            try:
+                ped_w = float(raw.strip())
+            except ValueError:
+                questionary.print("Не число, для sidewalk-режимов будет 1.0.")
+    elif "sidewalk" in str(rm):
+        ped_w = _prompt_float("Вес пешеходов в награде", "1.0")
     return {"reward_mode": rm, "ped_reward_weight": ped_w}
 
 
 def _prompt_demo_saliency() -> dict[str, object] | None:
-    """Опции saliency для run_inference (консоль и при желании TensorBoard)."""
-    use = questionary.confirm(
-        "Saliency: печать |∂log π/∂obs| по наблюдению в консоль?",
-        default=False,
-    ).ask()
-    if use is None:
-        return None
+    """Опции saliency для run_inference (консоль и TensorBoard независимо)."""
     out: dict[str, object] = {
         "explain_obs_every": None,
         "explain_tls_limit": 2,
         "tensorboard_dir": None,
         "tensorboard_saliency_every": 1,
     }
-    if use:
-        out["explain_obs_every"] = _prompt_int("Печатать saliency каждые N шагов RL", "1")
+    tb_dir = (
+        _prompt_text(
+            "Каталог TensorBoard для saliency (пусто — не писать)",
+            "runs/saliency_demo",
+        )
+        or ""
+    ).strip()
+    if tb_dir:
+        out["tensorboard_dir"] = tb_dir
+        out["tensorboard_saliency_every"] = _prompt_int(
+            "TensorBoard: каждые N шагов RL", "1"
+        )
+
+    console_every = _prompt_int("Консоль saliency: каждые N шагов RL (0 — выкл.)", "0")
+    if console_every > 0:
+        out["explain_obs_every"] = console_every
         out["explain_tls_limit"] = _prompt_int(
             "Не больше скольких светофоров выводить за шаг", "2"
         )
-        tb = questionary.confirm("Дополнительно: писать saliency в TensorBoard?", default=False).ask()
-        if tb is None:
-            return None
-        if tb:
-            raw_dir = _prompt_text("Каталог TensorBoard", "runs/saliency_demo")
-            out["tensorboard_dir"] = (raw_dir or "").strip() or "runs/saliency_demo"
-            out["tensorboard_saliency_every"] = _prompt_int(
-                "Запись в TensorBoard каждые N шагов RL", "1"
-            )
     return out
 
 
@@ -256,35 +254,49 @@ def _loop_train() -> None:
         return
     period = _prompt_float("Интервал выпуска ТС (меньше = плотнее)", "0.5")
     duration = _prompt_int("Длительность, с", "3600")
-    traffic_extras = _prompt_simulation_traffic_extras()
+    training_iterations = _prompt_int("Число итераций обучения", "50")
+    traffic_extras = _prompt_simulation_traffic_extras(traffic_period=period)
     if traffic_extras is None:
         return
     reward_extras = _prompt_reward_extras()
     if reward_extras is None:
         return
 
+    from src.simulation.env import REWARD_MODE_ALL
+
     checkpoint_path: str | None = None
     resume = questionary.confirm(
-        "Продолжить обучение с checkpoint (Ray Tune)?",
+        "Продолжить обучение с чекпоинта (Ray Tune)?",
         default=False,
     ).ask()
     if resume is None:
         return
     if resume:
-        ckpt = _prompt_existing_path(
-            "Каталог trial (PPO_…) или checkpoint_000… в ray_results"
-        )
-        if not ckpt:
-            questionary.print("Путь не найден.")
-            return
-        checkpoint_path = ckpt
+        if reward_extras.get("reward_mode") == REWARD_MODE_ALL:
+            questionary.print("Режим «все»: продолжение с чекпоинта недоступно.")
+        else:
+            ckpt = _prompt_existing_path(
+                "Каталог trial (PPO_…) или checkpoint_000… в ray_results"
+            )
+            if not ckpt:
+                questionary.print("Путь не найден.")
+                return
+            checkpoint_path = ckpt
 
-    questionary.print("Обучение…")
+    if reward_extras.get("reward_mode") == REWARD_MODE_ALL:
+        from src.simulation.env import REWARD_MODES
+
+        questionary.print(
+            f"Обучение по всем режимам ({len(REWARD_MODES)} прогонов), у каждого свой каталог…"
+        )
+    else:
+        questionary.print("Обучение…")
     run_train(
         net_xml,
         period,
         duration,
         checkpoint_path=checkpoint_path,
+        training_iterations=training_iterations,
         **traffic_extras,
         **reward_extras,
     )
@@ -301,7 +313,7 @@ def _loop_sumo_freerun() -> None:
     gui = questionary.confirm("Окно SUMO?", default=True).ask()
     if gui is None:
         return
-    traffic_extras = _prompt_simulation_traffic_extras()
+    traffic_extras = _prompt_simulation_traffic_extras(traffic_period=period)
     if traffic_extras is None:
         return
     reward_extras = _prompt_reward_extras()
@@ -321,7 +333,7 @@ def _loop_sumo_freerun() -> None:
 def _loop_demo() -> None:
     from demo import run_inference
 
-    ckpt = _prompt_existing_path("Каталог checkpoint")
+    ckpt = _prompt_existing_path("Каталог чекпоинта")
     if not ckpt or not os.path.isdir(ckpt):
         questionary.print("Укажите существующий каталог.")
         return
@@ -333,7 +345,7 @@ def _loop_demo() -> None:
     gui = questionary.confirm("Окно SUMO?", default=True).ask()
     if gui is None:
         return
-    traffic_extras = _prompt_simulation_traffic_extras()
+    traffic_extras = _prompt_simulation_traffic_extras(traffic_period=period)
     if traffic_extras is None:
         return
     reward_extras = _prompt_reward_extras()
@@ -358,7 +370,7 @@ def _loop_demo() -> None:
 def _loop_benchmark() -> None:
     from benchmark import run_comprehensive_benchmark
 
-    ckpt = _prompt_existing_path("Каталог checkpoint")
+    ckpt = _prompt_existing_path("Каталог чекпоинта")
     if not ckpt or not os.path.isdir(ckpt):
         questionary.print("Укажите существующий каталог.")
         return
@@ -367,27 +379,68 @@ def _loop_benchmark() -> None:
         return
     period = _prompt_float("Интервал выпуска ТС", "0.4")
     duration = _prompt_int("Длительность, с", "3600")
-    traffic_extras = _prompt_simulation_traffic_extras()
+    traffic_extras = _prompt_simulation_traffic_extras(traffic_period=period)
     if traffic_extras is None:
         return
     reward_extras = _prompt_reward_extras()
     if reward_extras is None:
         return
+    saliency_opts = _prompt_demo_saliency()
+    if saliency_opts is None:
+        return
+    num_runs = _prompt_int("Число прогонов benchmark", "1")
+    if num_runs < 1:
+        questionary.print("Число прогонов должно быть >= 1.")
+        return
+    confidence_level = 0.95
+    if num_runs > 1:
+        confidence_level = _prompt_float("Уровень доверия для ДИ (0–1)", "0.95")
+        if not 0 < confidence_level < 1:
+            questionary.print("Уровень доверия должен быть в (0, 1), используется 0.95.")
+            confidence_level = 0.95
+    output_path: str | None = None
+    json_default = (
+        f"benchmark_{num_runs}runs.json" if num_runs > 1 else "benchmark_results.json"
+    )
+    save_json = questionary.confirm(
+        "Сохранить результаты в JSON?",
+        default=num_runs > 1,
+    ).ask()
+    if save_json is None:
+        return
+    if save_json:
+        raw = _prompt_text("Путь к JSON", json_default)
+        output_path = _abspath(raw) if raw and raw.strip() else _abspath(json_default)
     questionary.print("Сравнение…")
-    run_comprehensive_benchmark(
+    result = run_comprehensive_benchmark(
         ckpt,
         net_xml,
         duration,
         period,
+        output_path=output_path,
+        tensorboard_dir=saliency_opts.get("tensorboard_dir"),
+        tensorboard_saliency_every=int(saliency_opts.get("tensorboard_saliency_every", 1)),
+        explain_tls_limit=int(saliency_opts.get("explain_tls_limit", 2)),
+        num_runs=num_runs,
+        confidence_level=confidence_level,
         **traffic_extras,
         **reward_extras,
     )
+    if output_path:
+        questionary.print(f"Результаты сохранены: {output_path}")
+    if num_runs > 1 and isinstance(result, dict) and "summary" in result:
+        from benchmark import _summary_to_dataframe
+
+        questionary.print(
+            f"\nСводка ({num_runs} прогонов, ДИ {int(round(confidence_level * 100))}%):"
+        )
+        questionary.print(_summary_to_dataframe(result["summary"]).to_string())
 
 
 def run_tui() -> None:
     while True:
         choice = questionary.select(
-            "Traffic control",
+            "Управление трафиком",
             choices=[
                 "Подготовка сети",
                 "Обучение",

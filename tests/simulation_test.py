@@ -82,7 +82,7 @@ def test_create_config_writes_sumocfg(tmp_path):
     assert os.path.exists(runner.cfg_file)
     content = open(runner.cfg_file, "r", encoding="utf-8").read()
     assert "<configuration>" in content
-    assert str(net_file.name) not in content  # stored as copied worker-local net file
+    assert str(net_file.name) not in content  # в конфиге абсолютный путь к копии сети воркера
     assert '<end value="3600"/>' in content
     assert "ignore-route-errors" in content
 

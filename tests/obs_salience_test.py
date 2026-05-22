@@ -49,9 +49,13 @@ def test_mean_abs_saliency_across_tls() -> None:
 class _DummyTBWriter:
     def __init__(self) -> None:
         self.scalars: list[tuple[str, float, int]] = []
+        self.flush_count = 0
 
     def add_scalar(self, tag: str, value: float, step: int) -> None:
         self.scalars.append((tag, value, step))
+
+    def flush(self) -> None:
+        self.flush_count += 1
 
 
 def test_log_saliency_tensorboard_writes_shares_sum_to_one() -> None:
@@ -63,6 +67,8 @@ def test_log_saliency_tensorboard_writes_shares_sum_to_one() -> None:
         val for tag, val, st in w.scalars if tag.startswith("t/share_sum/") and st == 42
     ]
     assert abs(sum(share_vals) - 1.0) < 1e-5
+    assert w.flush_count >= 1
+    assert any(tag.endswith("/_meta/features_logged") for tag, _, _ in w.scalars)
 
 
 def test_format_top_saliency_orders_descending() -> None:
