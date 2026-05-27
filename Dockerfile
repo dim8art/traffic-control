@@ -3,9 +3,10 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     SUMO_HOME=/usr/share/sumo \
-    PATH="/opt/venv/bin:${SUMO_HOME}/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1
+
+ENV PATH="/opt/venv/bin:${SUMO_HOME}/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
